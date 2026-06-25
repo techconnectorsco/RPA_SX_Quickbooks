@@ -1,0 +1,32 @@
+# Entorno virtual
+venv/
+
+# Variables de entorno y tokens
+config/.env
+config/tokens.json
+config/tokens_empresas.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs
+logs/
+
+# Data (opcional, descomenta si no quieres versionar los xlsx)
+# data/
+
+*.md 
+node_modules/
+.env
+.env.*
+.svelte-kit/
+.build/
+dist/
+*.sql
+*.csv
+*.xlsx
+*.json
