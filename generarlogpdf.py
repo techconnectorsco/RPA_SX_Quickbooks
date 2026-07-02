@@ -83,7 +83,6 @@ def generar_qr_verificacion(stats: Dict, fecha: str, hora: str) -> str:
 class LogFacturacionPDF(FPDF):
 
     def __init__(self, entorno: str, logo_path: str = "img/SX.png"):
-        # Usamos formato Horizontal (L) y Legal para poder meter todas las columnas de las líneas detalladas
         super().__init__(orientation="L", unit="mm", format="Legal")
         self.entorno = entorno.upper()
         self.logo_path = logo_path
@@ -96,7 +95,6 @@ class LogFacturacionPDF(FPDF):
         self.qr_path = qr_path
 
     def header(self):
-        # Logo de Soportexperto
         if self.logo_path and os.path.exists(self.logo_path):
             self.image(self.logo_path, 15, 8, 40)
 
@@ -117,7 +115,7 @@ class LogFacturacionPDF(FPDF):
             "C",
         )
 
-        # Fechas y metadatos (Top Derecha)
+        # Fechas y metadatos
         self.set_font("Arial", "", 10)
         self.set_text_color(*GRIS_TEXTO)
         fecha = self.datos_proceso.get("fecha", datetime.now().strftime("%d/%m/%Y"))
@@ -127,7 +125,7 @@ class LogFacturacionPDF(FPDF):
         self.set_xy(-110, 15)
         self.cell(60, 5, f"Hora Ejecución: {hora}", 0, 1, "R")
 
-        # QR de Validación corporativa
+        # QR de Validación
         if self.qr_path and os.path.exists(self.qr_path):
             self.image(self.qr_path, self.w - 42, 5, 30)
             self.set_font("Arial", "I", 6)
@@ -135,7 +133,6 @@ class LogFacturacionPDF(FPDF):
             self.set_xy(self.w - 44, 36)
             self.cell(34, 3, "Validación Interna RPA", 0, 0, "C")
 
-        # Línea divisoria elegante
         self.set_draw_color(*AZUL_ACCENTO)
         self.set_line_width(0.6)
         self.line(10, 41, self.w - 10, 41)
@@ -143,7 +140,6 @@ class LogFacturacionPDF(FPDF):
 
     def footer(self):
         self.set_y(-23)
-        # Decoración inferior
         self.set_fill_color(*AZUL_ACCENTO)
         self.rect(0, self.h - 24, self.w, 2, "F")
         self.set_fill_color(*AZUL_FOOTER)
@@ -152,20 +148,12 @@ class LogFacturacionPDF(FPDF):
         self.set_text_color(255, 255, 255)
         self.set_font("Arial", "B", 10)
         self.set_y(-17)
-        self.cell(
-            0,
-            5,
-            "Oficina de Transformación Digital | SoporteXperto",
-            0,
-            1,
-            "C",
-        )
+        self.cell(0, 5, "Oficina de Transformación Digital | SoporteXperto", 0, 1, "C")
         self.set_font("Arial", "I", 8)
         self.cell(
             0, 5, "SOPORTEXPERTO.COM | Monitoreo de Procesos QuickBooks", 0, 1, "C"
         )
 
-        # Paginación
         self.set_font("Arial", "I", 9)
         self.set_xy(-25, -13)
         self.cell(15, 5, f"Pág {self.page_no()}", 0, 0, "R")
@@ -187,20 +175,16 @@ class LogFacturacionPDF(FPDF):
         self.set_font("Arial", "B", 10)
         self.set_text_color(0, 0, 0)
 
-        # Datos en columnas alineadas
         self.cell(65, 6, f"Total Solicitudes: {stats.get('total', 0)}", 0, 0)
-
         self.set_text_color(*VERDE_OK)
         self.cell(65, 6, f"Facturadas [OK]: {stats.get('exitosas', 0)}", 0, 0)
-
         self.set_text_color(*ROJO_ERR)
         self.cell(65, 6, f"Con Error [ERR]: {stats.get('errores', 0)}", 0, 0)
-
         self.set_text_color(0, 0, 0)
         self.cell(
             0,
             6,
-            f"Monto Total Procesado: {formato_moneda(stats.get('monto_total', 0))} USD",
+            f"Monto Total Processado: {formato_moneda(stats.get('monto_total', 0))} USD",
             0,
             1,
         )
@@ -208,34 +192,26 @@ class LogFacturacionPDF(FPDF):
         self.set_x(15)
         self.set_font("Arial", "I", 9)
         self.set_text_color(*GRIS_TEXTO)
-        self.cell(
-            0,
-            5,
-            f"Duración de corrida: {stats.get('duracion', 'N/A')}",
-            0,
-            1,
-        )
+        self.cell(0, 5, f"Duración de corrida: {stats.get('duracion', 'N/A')}", 0, 1)
         self.ln(6)
 
     def agregar_detalle_operaciones(self, operaciones: List[Dict]):
-        """Genera la tabla super detallada mapeando facturas y líneas internas."""
+        """Genera la tabla consolidada de una sola fila por operación/factura."""
         self.set_font("Arial", "B", 11)
         self.set_text_color(*AZUL_CORP)
-        self.cell(0, 6, "2. DESGLOSE GRANULAR DE OPERACIONES Y LÍNEAS", 0, 1, "L")
+        self.cell(0, 6, "2. DETALLE DE COMPROBACIÓN DE FACTURAS", 0, 1, "L")
         self.ln(1)
 
-        # Columnas estructurales ajustadas para el ancho Legal Horizontal (355.6 mm de ancho total)
-        # Anchos suman 335 mm (deja márgenes perfectos)
-        anchos = [65, 35, 25, 100, 20, 25, 25, 40]
+        # Anchos recalculados estratégicamente para sumar 335 mm
+        anchos = [65, 45, 25, 110, 25, 30, 35]
         headers = [
             "ID Operación / UUID",
             "Compañía",
-            "Factura QBO",
-            "Línea: Descripción del Servicio",
-            "Horas",
-            "Precio/H",
-            "Total Línea",
-            "Estado Sync",
+            "Factura QB",
+            "Descripción de la Factura",
+            "Total Horas",
+            "Total Factura",
+            "Estado",
         ]
 
         def imprimir_headers():
@@ -252,85 +228,74 @@ class LogFacturacionPDF(FPDF):
         self.set_text_color(0, 0, 0)
 
         for op in operaciones:
-            lineas = op.get("lineas", [])
-            num_lineas = len(lineas) if lineas else 1
-
-            # Si nos estamos quedando sin espacio en la página, salto preventivo
-            if self.get_y() > self.h - 35:
+            # Salto preventivo por página si se agota el espacio
+            if self.get_y() > self.h - 25:
                 self.add_page()
                 imprimir_headers()
 
-            y_antes_de_op = self.get_y()
+            self.set_x(10)
 
-            # Determinar el color de estado general de la operación
+            # Consolidamos los datos numéricos de las líneas internamente para la fila única
+            lineas = op.get("lineas", [])
+            total_horas = sum(float(ln.get("horas_trabajadas", 0)) for ln in lineas)
+            total_factura = sum(float(ln.get("total_linea", 0)) for ln in lineas)
+
+            # 1. ID Operación / UUID
+            self.set_font("Arial", "B", 7)
+            self.cell(anchos[0], 6, op.get("id", "-"), 1, 0, "C")
+
+            # 2. Compañía
+            self.set_font("Arial", "", 8)
+            comp = (op.get("compania") or "")[:25]
+            self.cell(anchos[1], 6, comp, 1, 0, "L")
+
+            # 3. Factura QB
+            self.set_font("Arial", "B", 8)
+            self.cell(anchos[2], 6, str(op.get("factura", "-")), 1, 0, "C")
+
+            # 4. Descripción de la Factura (Limpieza Latin-1 incluida)
+            self.set_font("Arial", "", 8)
+            desc_factura = (op.get("descripcion_factura") or "-")[:75]
+            desc_factura = desc_factura.encode("latin-1", "replace").decode("latin-1")
+            self.cell(anchos[3], 6, desc_factura, 1, 0, "L")
+
+            # 5. Total Horas
+            self.cell(
+                anchos[4],
+                6,
+                f"{total_horas:,.2f}" if total_horas > 0 else "0.00",
+                1,
+                0,
+                "C",
+            )
+
+            # 6. Total Factura
+            self.cell(anchos[5], 6, f"{formato_moneda(total_factura)} USD", 1, 0, "R")
+
+            # 7. Estado Sync
             color_estado = VERDE_OK if op.get("status") == "OK" else ROJO_ERR
+            self.set_font("Arial", "B", 8)
+            self.set_text_color(*color_estado)
 
-            # Iterar por cada una de las líneas para imprimir la cuadrícula detallada
-            for idx, ln in enumerate(lineas):
-                if self.get_y() > self.h - 25:
-                    self.add_page()
-                    imprimir_headers()
+            if op.get("status") == "OK":
+                txt_status = "OK"
+            else:
+                txt_status = f"{op.get('error_msg', 'Error')}"[:22]
 
-                # Celdas que cambian por línea
-                # Calculamos el X de inicio de fila para mantener control estricto de columnas
-                self.set_x(10)
-
-                # 1. ID Operación (Solo se pone en la primera línea o repetido elegantemente)
-                self.set_font("Arial", "B" if idx == 0 else "", 7)
-                self.cell(anchos[0], 6, op.get("id") if idx == 0 else '"', 1, 0, "C")
-
-                # 2. Compañía
-                self.set_font("Arial", "", 7)
-                comp = (op.get("compania") or "")[:20]
-                self.cell(anchos[1], 6, comp if idx == 0 else '"', 1, 0, "L")
-
-                # 3. Documento / Factura Nro
-                self.set_font("Arial", "B", 8)
-                self.cell(
-                    anchos[2],
-                    6,
-                    str(op.get("factura", "-")) if idx == 0 else '"',
-                    1,
-                    0,
-                    "C",
-                )
-
-                # ---- DATOS DE LA LÍNEA ESPECÍFICA ----
-                self.set_font("Arial", "", 8)
-                desc_linea = (ln.get("descripcion") or "")[:60]
-
-                desc_linea = desc_linea.encode("latin-1", "replace").decode("latin-1")
-
-                self.cell(anchos[3], 6, f" -> {desc_linea}", 1, 0, "L")
-                self.cell(anchos[4], 6, str(ln.get("horas_trabajadas", 0)), 1, 0, "C")
-                self.cell(
-                    anchos[5], 6, formato_moneda(ln.get("monto_por_hora", 0)), 1, 0, "R"
-                )
-                self.cell(
-                    anchos[6], 6, formato_moneda(ln.get("total_linea", 0)), 1, 0, "R"
-                )
-
-                # 8. Estado individual / Logs de Error
-                self.set_font("Arial", "B", 8)
-                self.set_text_color(*color_estado)
-                txt_status = (
-                    op.get("error_msg")
-                    if op.get("status") != "OK"
-                    else "Sincronizado OK"
-                )
-                txt_status = txt_status.encode("latin-1", "replace").decode("latin-1")
-                self.cell(anchos[7], 6, txt_status[:24] if idx == 0 else '"', 1, 1, "C")
-                self.set_text_color(0, 0, 0)
+            txt_status = txt_status.encode("latin-1", "replace").decode("latin-1")
+            self.cell(anchos[6], 6, txt_status, 1, 1, "C")
+            self.set_text_color(0, 0, 0)
 
 
 # =============================================================================
-# MANEJADOR / COLECTOR ORQUESTADOR (La clase que vas a llamar desde operaciones.py)
+# MANEJADOR / COLECTOR ORQUESTADOR
 # =============================================================================
 class ReporteFacturacionRPA:
 
     def __init__(self, entorno: str):
         self.entorno = entorno
         self.inicio_time = datetime.now()
+        self.operaciones_processed = []  # backward compatibility alias interna
         self.operaciones_procesadas = []
         self.monto_acumulado = 0.0
         self.exitosas = 0
@@ -344,6 +309,7 @@ class ReporteFacturacionRPA:
         lineas: List[Dict],
         status: str,
         error_msg: str = "",
+        descripcion_factura: str = "",
     ):
         """Agrega los datos recolectados de una operación al lote del reporte."""
         total_op = (
@@ -366,6 +332,7 @@ class ReporteFacturacionRPA:
                 "lineas": lineas,
                 "status": status,
                 "error_msg": error_msg,
+                "descripcion_factura": descripcion_factura,
             }
         )
 
@@ -383,7 +350,6 @@ class ReporteFacturacionRPA:
             "duracion": duracion_str,
         }
 
-        # Generar QR
         qr_file = generar_qr_verificacion(
             stats,
             self.inicio_time.strftime("%d/%m/%Y"),
@@ -403,7 +369,6 @@ class ReporteFacturacionRPA:
         pdf.agregar_resumen(stats)
         pdf.agregar_detalle_operaciones(self.operaciones_procesadas)
 
-        # Formatear nombre de archivo final
         timestamp = self.inicio_time.strftime("%Y%m%d_%H%M%S")
         os.makedirs(directorio_salida, exist_ok=True)
         nombre_archivo = f"facturacion_{self.entorno.lower()}_{timestamp}.pdf"
@@ -411,7 +376,6 @@ class ReporteFacturacionRPA:
 
         pdf.output(ruta_completa)
 
-        # Borrar QR temporal
         if qr_file and os.path.exists(qr_file):
             try:
                 os.remove(qr_file)

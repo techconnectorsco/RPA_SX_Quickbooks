@@ -517,7 +517,7 @@ def main():
             if not realm or realm == "TODO":
                 marcar_error(conn, oid, "Empresa sin realm_id (no factura por QBO)")
 
-                # Registramos el error en tu reporte
+                # >>> REGISTRO CORREGIDO CON DESCRIPCIÓN <<<
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
@@ -525,6 +525,9 @@ def main():
                     lineas=[],
                     status="ERR",
                     error_msg="Empresa sin realm_id",
+                    descripcion_factura=op.get(
+                        "descripcion_factura", "-"
+                    ),  # <--- Agregado aquí
                 )
                 print(f"  [SKIP] {oid}: empresa sin realm")
                 continue
@@ -540,7 +543,7 @@ def main():
             if not customer:
                 marcar_error(conn, oid, "Operacion sin qbo_customer_id")
 
-                # Registramos el error en tu reporte
+                # >>> REGISTRO CORREGIDO CON DESCRIPCIÓN <<<
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
@@ -548,6 +551,9 @@ def main():
                     lineas=[],
                     status="ERR",
                     error_msg="Sin qbo_customer_id",
+                    descripcion_factura=op.get(
+                        "descripcion_factura", "-"
+                    ),  # <--- Agregado aquí
                 )
                 print(f"  [SKIP] {oid}: sin qbo_customer_id")
                 continue
@@ -563,13 +569,14 @@ def main():
 
                 marcar_facturada(conn, oid, inv["Id"], inv.get("DocNumber"))
 
-                # 3. ÉXITO: Registramos la operación completada en tu reporte
+                # 3. ÉXITO: Registramos la operación (ESTÁ PERFECTO)
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
                     factura_num=inv.get("DocNumber", "-"),
-                    lineas=lineas,  # Pasamos las líneas leídas de la BD
+                    lineas=lineas,
                     status="OK",
+                    descripcion_factura=op.get("descripcion_factura", "-"),
                 )
                 print(
                     f"  [OK]   {oid}: factura {inv.get('DocNumber')} total {inv.get('TotalAmt')}"
@@ -578,7 +585,8 @@ def main():
             except Exception as e:
                 marcar_error(conn, oid, e)
 
-                # 4. Error dinámico en el proceso de envío
+                # 4. Error dinámico en el proceso de envío (ESTÁ PERFECTO)
+                # NOTA: Pasamos lineas=[] para que en errores muestre 0.00 en montos, lo cual es correcto.
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
@@ -586,6 +594,7 @@ def main():
                     lineas=[],
                     status="ERR",
                     error_msg=str(e),
+                    descripcion_factura=op.get("descripcion_factura", "-"),
                 )
                 print(f"  [ERR]  {oid}: {e}")
 
