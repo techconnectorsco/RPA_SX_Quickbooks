@@ -40,6 +40,7 @@ from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
 from tipo_cambio import obtener_tipo_cambio
+from generarlog_fijos import ReporteContratosFijosRPA
 
 # ════════════════════════════════════════════════════════════════════════════
 #  CONFIGURACION
@@ -53,7 +54,7 @@ from tipo_cambio import obtener_tipo_cambio
 
 LIMITE_FACTURAS = None  # None = todas.  1 = procesar solo UNA (util al pasar a prod).
 IGNORAR_DIA_EMISION = (
-    False  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
+    True  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
 )
 
 # Si en PRODUCCION falta un impuesto del % que pide una linea:
@@ -512,57 +513,6 @@ def enviar_factura(realm, token, factura):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  LOG EN PDF
-# ════════════════════════════════════════════════════════════════════════════
-
-
-def generar_pdf(resultados):
-    try:
-        from fpdf import FPDF
-    except ImportError:
-        print("[aviso] fpdf2 no instalado; salto el PDF. (pip install fpdf2)")
-        return None
-
-    os.makedirs("logs", exist_ok=True)
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    ruta = os.path.join("logs", f"contratos_{ENTORNO}_{ts}.pdf")
-
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, f"RPA Contratos Fijos - Log ({ENTORNO})", ln=1)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.cell(0, 6, f"Fecha: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}", ln=1)
-    ok = sum(1 for r in resultados if r["ok"])
-    pdf.cell(
-        0,
-        6,
-        f"Total: {len(resultados)}   Facturadas: {ok}   Errores: {len(resultados)-ok}",
-        ln=1,
-    )
-    pdf.ln(3)
-
-    for r in resultados:
-        pdf.set_font("Helvetica", "B", 9)
-        estado = "OK" if r["ok"] else "ERROR"
-        pdf.multi_cell(0, 5, f"[{estado}] {r['cliente']}  ({r['tipo']})")
-        pdf.set_font("Helvetica", "", 8)
-        if r["ok"]:
-            extra = f" | TC {r['tc']}" if r.get("tc") else ""
-            pdf.multi_cell(
-                0,
-                5,
-                f"   Factura QBO Id {r['qbo_invoice_id']} / DocNumber {r['qbo_doc_number']} / Total {r['total']}{extra}",
-            )
-        else:
-            pdf.multi_cell(0, 5, f"   {r['error']}")
-        pdf.ln(1)
-
-    pdf.output(ruta)
-    return ruta
-
-
-# ════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -598,8 +548,10 @@ def main():
         print("   *** IGNORANDO dia_emision (modo prueba) ***")
     print("=" * 60)
 
+    # Orquestador de reporte PDF (contratos fijos, archivo aparte)
+    reporte = ReporteContratosFijosRPA(entorno=ENTORNO)
+
     conn = psycopg2.connect(DATABASE_URL)
-    resultados = []
     tc_dia = None  # se consulta solo si hace falta (alguna emision invertida)
 
     try:
@@ -628,16 +580,20 @@ def main():
             realm = realm_de(em)
             cliente_lbl = em.get("compania_facturadora", "")
             tipo = em["estado_emision"]
+            desc_fact = (
+                em.get("emision_descripcion") or em.get("contrato_descripcion") or "-"
+            )
 
             if not realm or realm == "TODO":
                 marcar_error(conn, eid, "Empresa sin realm_id")
-                resultados.append(
-                    {
-                        "ok": False,
-                        "cliente": cliente_lbl,
-                        "tipo": tipo,
-                        "error": "Empresa sin realm_id",
-                    }
+                reporte.registrar_emision(
+                    compania=cliente_lbl,
+                    factura_num="-",
+                    tipo=tipo,
+                    lineas=[],
+                    status="ERR",
+                    error_msg="Empresa sin realm_id",
+                    descripcion_factura=desc_fact,
                 )
                 print(f"  [SKIP] {cliente_lbl}: empresa sin realm")
                 continue
@@ -648,13 +604,14 @@ def main():
             customer = CFG["cliente_fijo"] or em["qbo_customer_id"]
             if not customer:
                 marcar_error(conn, eid, "Contrato sin qbo_customer_id")
-                resultados.append(
-                    {
-                        "ok": False,
-                        "cliente": cliente_lbl,
-                        "tipo": tipo,
-                        "error": "Sin qbo_customer_id",
-                    }
+                reporte.registrar_emision(
+                    compania=cliente_lbl,
+                    factura_num="-",
+                    tipo=tipo,
+                    lineas=[],
+                    status="ERR",
+                    error_msg="Sin qbo_customer_id",
+                    descripcion_factura=desc_fact,
                 )
                 print(f"  [SKIP] {cliente_lbl}: sin qbo_customer_id")
                 continue
@@ -673,37 +630,53 @@ def main():
                 if realm not in tokens:
                     tokens[realm] = get_access_token(realm)
                 lineas = leer_lineas_contrato(conn, em["contrato_id"])
+
+                # Sin lineas no hay nada que facturar: QBO rechazaria la factura
+                # con "Line is missing". Lo detectamos antes para dejar un estado
+                # claro en el log y no gastar la llamada.
+                if not lineas:
+                    raise RuntimeError("Contrato sin lineas para facturar")
+
                 factura = construir_factura(em, lineas, realm, tokens[realm], tc_venta)
                 inv = enviar_factura(realm, tokens[realm], factura)
 
                 marcar_emitida(conn, eid, inv, tc_venta)
-                resultados.append(
-                    {
-                        "ok": True,
-                        "cliente": cliente_lbl,
-                        "tipo": tipo,
-                        "qbo_invoice_id": inv["Id"],
-                        "qbo_doc_number": inv.get("DocNumber"),
-                        "total": inv.get("TotalAmt"),
-                        "tc": tc_venta,
-                    }
+
+                # Moneda con la que realmente se emitio la factura (dinamica)
+                moneda_emitida = moneda_factura(
+                    em.get("moneda") or "Dólares", bool(em.get("moneda_invertida"))
+                )
+                reporte.registrar_emision(
+                    compania=cliente_lbl,
+                    factura_num=inv.get("DocNumber", "-"),
+                    tipo=tipo,
+                    lineas=lineas,
+                    status="OK",
+                    descripcion_factura=desc_fact,
+                    moneda=moneda_emitida,
+                    tipo_cambio_usado=tc_venta,
                 )
                 print(
                     f"  [OK]   {cliente_lbl} ({tipo}): factura {inv.get('DocNumber')} total {inv.get('TotalAmt')}"
                 )
             except Exception as e:
                 marcar_error(conn, eid, e)
-                resultados.append(
-                    {"ok": False, "cliente": cliente_lbl, "tipo": tipo, "error": str(e)}
+                reporte.registrar_emision(
+                    compania=cliente_lbl,
+                    factura_num="-",
+                    tipo=tipo,
+                    lineas=[],
+                    status="ERR",
+                    error_msg=str(e),
+                    descripcion_factura=desc_fact,
                 )
                 print(f"  [ERR]  {cliente_lbl}: {e}")
     finally:
         conn.close()
 
-    ruta_pdf = generar_pdf(resultados)
-    ok = sum(1 for r in resultados if r["ok"])
+    ruta_pdf = reporte.exportar_pdf()
     print("\n" + "=" * 60)
-    print(f"Listo. Facturadas: {ok}   Errores: {len(resultados)-ok}")
+    print(f"Listo. Facturadas: {reporte.exitosas}   Errores: {reporte.errores}")
     if ruta_pdf:
         print(f"Log PDF: {ruta_pdf}")
     print("=" * 60)

@@ -356,8 +356,8 @@ def convertir_monto(monto, moneda_operacion, invertir, tc_venta):
     Devuelve el monto en la moneda en que se va a facturar.
     Si no se invierte, el monto queda igual (moneda de la operacion).
     Si se invierte:
-    - operacion USD -> factura CRC: multiplica por venta.
-    - operacion CRC -> factura USD: divide por venta.
+      - operacion USD -> factura CRC: multiplica por venta.
+      - operacion CRC -> factura USD: divide por venta.
     """
     if not invertir or not tc_venta:
         return round(float(monto), 2)
@@ -665,12 +665,24 @@ def main():
                     tokens[realm] = get_access_token(realm)
 
                 lineas = leer_lineas(conn, oid)
+
+                # Sin lineas no hay nada que facturar: QBO rechazaria la factura
+                # con "Line is missing". Lo detectamos antes para no gastar la
+                # llamada y dejar un estado claro en el log.
+                if not lineas:
+                    raise RuntimeError("Operacion sin lineas para facturar")
                 factura = construir_factura(op, lineas, realm, tokens[realm], tc_venta)
                 inv = enviar_factura(realm, tokens[realm], factura)
 
                 marcar_facturada(conn, oid, inv["Id"], inv.get("DocNumber"), tc_venta)
 
-                # 3. ÉXITO: Registramos la operación (ESTÁ PERFECTO)
+                # Moneda con la que realmente se emitio la factura (dinamica):
+                # si la operacion invierte, es la contraria a la de la operacion.
+                moneda_emitida = moneda_factura(
+                    op.get("moneda") or "Dólares", bool(op.get("moneda_invertida"))
+                )
+
+                # 3. ÉXITO: Registramos la operación (con moneda y tipo de cambio)
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
@@ -678,6 +690,8 @@ def main():
                     lineas=lineas,
                     status="OK",
                     descripcion_factura=op.get("descripcion_factura", "-"),
+                    moneda=moneda_emitida,
+                    tipo_cambio_usado=tc_venta,
                 )
                 tc_txt = f" TC {tc_venta}" if tc_venta else ""
                 print(
