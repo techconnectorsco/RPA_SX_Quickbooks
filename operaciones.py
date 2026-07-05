@@ -180,8 +180,8 @@ def leer_operaciones_aprobadas(conn):
     """Operaciones 'aprobada' sin factura todavia, con el realm de su empresa."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
-            SELECT o.id, o.qbo_customer_id, o.compania_facturadora, o.moneda,
-                   o.moneda_invertida, o.descripcion_factura, e.realm_id
+            SELECT o.id, o.qbo_customer_id, o.compania_facturadora, o.cliente,
+                   o.moneda, o.moneda_invertida, o.descripcion_factura, e.realm_id
             FROM operaciones o
             LEFT JOIN empresas e ON e.nombre = o.compania_facturadora
             WHERE o.estado = 'aprobada' AND o.qbo_invoice_id IS NULL
@@ -600,6 +600,7 @@ def main():
             oid = op["id"]
             realm = realm_de(op)
             cliente_lbl = op.get("compania_facturadora", "")
+            cliente_nom = op.get("cliente", "") or "-"  # cliente al que se factura
 
             # 1. Error: Empresa sin Realm
             if not realm or realm == "TODO":
@@ -609,6 +610,7 @@ def main():
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
+                    cliente=cliente_nom,
                     factura_num="-",
                     lineas=[],
                     status="ERR",
@@ -635,6 +637,7 @@ def main():
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
+                    cliente=cliente_nom,
                     factura_num="-",
                     lineas=[],
                     status="ERR",
@@ -665,12 +668,6 @@ def main():
                     tokens[realm] = get_access_token(realm)
 
                 lineas = leer_lineas(conn, oid)
-
-                # Sin lineas no hay nada que facturar: QBO rechazaria la factura
-                # con "Line is missing". Lo detectamos antes para no gastar la
-                # llamada y dejar un estado claro en el log.
-                if not lineas:
-                    raise RuntimeError("Operacion sin lineas para facturar")
                 factura = construir_factura(op, lineas, realm, tokens[realm], tc_venta)
                 inv = enviar_factura(realm, tokens[realm], factura)
 
@@ -686,6 +683,7 @@ def main():
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
+                    cliente=cliente_nom,
                     factura_num=inv.get("DocNumber", "-"),
                     lineas=lineas,
                     status="OK",
@@ -707,6 +705,7 @@ def main():
                 reporte.registrar_operacion(
                     op_id=oid,
                     compania=cliente_lbl,
+                    cliente=cliente_nom,
                     factura_num="-",
                     lineas=[],
                     status="ERR",

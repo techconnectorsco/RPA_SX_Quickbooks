@@ -99,9 +99,9 @@ ENTORNOS = {
         # NOTA (Fase 2): hoy el item es FIJO por empresa; luego se hara dinamico
         # segun el tipo de servicio/clase de cada linea.
         "item_operaciones": {
-            "9130355360397996": "3",  # Soportexperto  -> CONTRATOS HORAS ORDINARIAS
+            "9130355360397996": "4",  # Soportexperto  -> CONTRATOS HORAS ADICIONALES
             "9130355360390096": "157",  # Hardware y Network -> Venta de Servicios y Proyectos
-            "9130355360394696": "4",  # Laitcorp       -> CONTRATOS HORAS ORDINARIAS
+            "9130355360394696": "5",  # Laitcorp       -> CONTRATOS HORAS ADICIONALES
         },
         "usar_moneda_real": True,
     },
@@ -579,6 +579,7 @@ def main():
             eid = em["emision_id"]
             realm = realm_de(em)
             cliente_lbl = em.get("compania_facturadora", "")
+            cliente_nom = em.get("cliente", "") or "-"  # cliente al que se factura
             tipo = em["estado_emision"]
             desc_fact = (
                 em.get("emision_descripcion") or em.get("contrato_descripcion") or "-"
@@ -588,6 +589,7 @@ def main():
                 marcar_error(conn, eid, "Empresa sin realm_id")
                 reporte.registrar_emision(
                     compania=cliente_lbl,
+                    cliente=cliente_nom,
                     factura_num="-",
                     tipo=tipo,
                     lineas=[],
@@ -606,6 +608,7 @@ def main():
                 marcar_error(conn, eid, "Contrato sin qbo_customer_id")
                 reporte.registrar_emision(
                     compania=cliente_lbl,
+                    cliente=cliente_nom,
                     factura_num="-",
                     tipo=tipo,
                     lineas=[],
@@ -648,6 +651,7 @@ def main():
                 )
                 reporte.registrar_emision(
                     compania=cliente_lbl,
+                    cliente=cliente_nom,
                     factura_num=inv.get("DocNumber", "-"),
                     tipo=tipo,
                     lineas=lineas,
@@ -663,6 +667,7 @@ def main():
                 marcar_error(conn, eid, e)
                 reporte.registrar_emision(
                     compania=cliente_lbl,
+                    cliente=cliente_nom,
                     factura_num="-",
                     tipo=tipo,
                     lineas=[],

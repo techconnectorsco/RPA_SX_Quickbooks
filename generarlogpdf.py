@@ -46,7 +46,7 @@ GRIS_FONDO = (248, 249, 250)
 
 # Tope FIJO de caracteres para la celda de descripcion. Medido para 152 mm en
 # Arial 8: el texto normal entra ~114; se usa 100 como corte seguro y prolijo.
-MAX_CHARS_DESCRIPCION = 120
+MAX_CHARS_DESCRIPCION = 110
 
 # Abreviaturas de empresa (por si la compania llega con el nombre largo).
 # Se hace por "contiene" para tolerar variaciones ("S.A.", tildes, etc.).
@@ -82,9 +82,6 @@ ERRORES_MAPEADOS = [
     ("qbo 5", "Rechazo QB"),
     ("400", "Rechazo QB"),
     ("500", "Rechazo QB"),
-    ("sin lineas", "Sin lineas"),
-    ("line is missing", "Sin lineas"),
-    ("2020", "Sin lineas"),
 ]
 
 
@@ -301,21 +298,17 @@ class LogFacturacionPDF(FPDF):
         self.set_font("Arial", "B", 11)
         self.set_text_color(*AZUL_CORP)
         self.cell(
-            0,
-            6,
-            "2. DETALLE DE COMPROBACIÓN DE FACTURAS - CRONOGRAMA DE OPERACIONES",
-            0,
-            1,
-            "L",
+            0, 6, "2. DETALLE DE COMPROBACIÓN DE FACTURAS - OPERACIONES", 0, 1, "L"
         )
         self.ln(1)
 
         # Anchos (mm). Suman ~335 (util de Legal horizontal con margenes 10+10).
-        # FACTURA  EMPRESA  DESCRIPCION  HORAS  TOTAL  T.CAMBIO  ESTADO
-        anchos = [26, 28, 169, 20, 38, 24, 30]
+        # FACTURA  EMPRESA  CLIENTE  DESCRIPCION  HORAS  TOTAL  T.CAMBIO  ESTADO
+        anchos = [24, 25, 50, 137, 20, 35, 22, 22]
         headers = [
             "FACTURA",
             "EMPRESA",
+            "CLIENTE",
             "DESCRIPCIÓN",
             "HORAS",
             "TOTAL",
@@ -356,17 +349,21 @@ class LogFacturacionPDF(FPDF):
             self.set_font("Arial", "B", 8)
             self.cell(anchos[0], 6, str(op.get("factura", "-")), 1, 0, "C")
 
-            # 2. EMPRESA (sigla)
+            # 2. EMPRESA (sigla facturadora)
             self.set_font("Arial", "", 8)
             self.cell(anchos[1], 6, abreviar_empresa(op.get("compania")), 1, 0, "L")
 
-            # 3. DESCRIPCIÓN (concatenada de las lineas, truncada fija)
-            desc = concatenar_descripcion(lineas, op.get("descripcion_factura"))
-            self.cell(anchos[2], 6, desc, 1, 0, "L")
+            # 3. CLIENTE (a quien se factura; truncado al ancho de la celda)
+            cliente_txt = _limpiar_latin1((op.get("cliente") or "-"))[:35]
+            self.cell(anchos[2], 6, cliente_txt, 1, 0, "L")
 
-            # 4. HORAS (suma)
+            # 4. DESCRIPCIÓN (concatenada de las lineas, truncada fija)
+            desc = concatenar_descripcion(lineas, op.get("descripcion_factura"))
+            self.cell(anchos[3], 6, desc, 1, 0, "L")
+
+            # 5. HORAS (suma)
             self.cell(
-                anchos[3],
+                anchos[4],
                 6,
                 f"{total_horas:,.2f}" if total_horas > 0 else "0.00",
                 1,
@@ -374,25 +371,25 @@ class LogFacturacionPDF(FPDF):
                 "C",
             )
 
-            # 5. TOTAL (con moneda dinamica)
+            # 6. TOTAL (con moneda dinamica)
             total_txt = f"{formato_moneda(total_factura)} {moneda}".strip()
-            self.cell(anchos[4], 6, total_txt, 1, 0, "R")
+            self.cell(anchos[5], 6, total_txt, 1, 0, "R")
 
-            # 6. T. CAMBIO (venta usada, o "-" si no hubo inversion)
+            # 7. T. CAMBIO (venta usada, o "-" si no hubo inversion)
             if tc:
                 tc_txt = f"{float(tc):,.2f}"
             else:
                 tc_txt = "-"
-            self.cell(anchos[5], 6, tc_txt, 1, 0, "C")
+            self.cell(anchos[6], 6, tc_txt, 1, 0, "C")
 
-            # 7. ESTADO (OK verde / error corto rojo)
+            # 8. ESTADO (OK verde / error corto rojo)
             es_ok = op.get("status") == "OK"
             self.set_text_color(*(VERDE_OK if es_ok else ROJO_ERR))
             self.set_font("Arial", "B", 8)
             txt_status = _limpiar_latin1(
                 estado_corto(op.get("status"), op.get("error_msg", ""))
             )
-            self.cell(anchos[6], 6, txt_status, 1, 1, "C")
+            self.cell(anchos[7], 6, txt_status, 1, 1, "C")
             self.set_text_color(0, 0, 0)
             self.set_font("Arial", "", 8)
 
@@ -421,9 +418,11 @@ class ReporteFacturacionRPA:
         descripcion_factura: str = "",
         moneda: str = "",
         tipo_cambio_usado=None,
+        cliente: str = "",
     ):
         """Agrega los datos recolectados de una operación al lote del reporte.
 
+        cliente           : nombre del cliente al que se le factura (SAMESA, etc.).
         moneda            : 'USD' / 'CRC' con que se emitio la factura (dinamica).
         tipo_cambio_usado : tasa de venta usada si hubo inversion; None si no hubo.
         """
@@ -443,6 +442,7 @@ class ReporteFacturacionRPA:
             {
                 "id": op_id,
                 "compania": compania,
+                "cliente": cliente,
                 "factura": factura_num,
                 "lineas": lineas,
                 "status": status,

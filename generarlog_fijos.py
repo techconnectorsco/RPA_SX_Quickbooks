@@ -39,7 +39,7 @@ GRIS_FONDO = (248, 249, 250)
 
 # Tope FIJO de caracteres para la descripcion. La celda es mas ancha que en
 # operaciones (no hay columna HORAS), asi que admite mas texto.
-MAX_CHARS_DESCRIPCION = 135
+MAX_CHARS_DESCRIPCION = 125
 
 ABREVIATURAS_EMPRESA = [
     ("hardware", "H&N"),
@@ -295,12 +295,14 @@ class LogContratosFijosPDF(FPDF):
         )
         self.ln(1)
 
-        # Anchos (mm). Suman ~335. Sin HORAS; la DESCRIPCION se lleva ese espacio.
-        # FACTURA  EMPRESA  TIPO  DESCRIPCION  TOTAL  T.CAMBIO  ESTADO
-        anchos = [26, 28, 28, 165, 40, 24, 24]
+        # Anchos (mm). Suman ~335. Sin HORAS; CLIENTE va tras EMPRESA.
+        # FACTURA  EMPRESA  CLIENTE  TIPO  DESCRIPCION  TOTAL  T.CAMBIO  ESTADO
+        # Anchos (mm). Suman ~334. FACTURA EMPRESA CLIENTE TIPO DESCRIPCION TOTAL T.CAMBIO ESTADO
+        anchos = [22, 25, 45, 25, 141, 35, 20, 22]
         headers = [
             "FACTURA",
             "EMPRESA",
+            "CLIENTE",
             "TIPO",
             "DESCRIPCIÓN",
             "TOTAL",
@@ -336,35 +338,39 @@ class LogContratosFijosPDF(FPDF):
             self.set_font("Arial", "B", 8)
             self.cell(anchos[0], 6, str(em.get("factura", "-")), 1, 0, "C")
 
-            # 2. EMPRESA
+            # 2. EMPRESA (sigla facturadora)
             self.set_font("Arial", "", 8)
             self.cell(anchos[1], 6, abreviar_empresa(em.get("compania")), 1, 0, "L")
 
-            # 3. TIPO (modo de emision)
+            # 3. CLIENTE (a quien se factura; truncado al ancho de la celda)
+            cliente_txt = _limpiar_latin1((em.get("cliente") or "-"))[:35]
+            self.cell(anchos[2], 6, cliente_txt, 1, 0, "L")
+
+            # 4. TIPO (modo de emision)
             self.cell(
-                anchos[2], 6, _limpiar_latin1(etiqueta_tipo(em.get("tipo"))), 1, 0, "C"
+                anchos[3], 6, _limpiar_latin1(etiqueta_tipo(em.get("tipo"))), 1, 0, "C"
             )
 
-            # 4. DESCRIPCIÓN (concatenada, truncada fija)
+            # 5. DESCRIPCIÓN (concatenada, truncada fija)
             desc = concatenar_descripcion(lineas, em.get("descripcion_factura"))
-            self.cell(anchos[3], 6, desc, 1, 0, "L")
+            self.cell(anchos[4], 6, desc, 1, 0, "L")
 
-            # 5. TOTAL (moneda dinamica)
+            # 6. TOTAL (moneda dinamica)
             total_txt = f"{formato_moneda(total_factura)} {moneda}".strip()
-            self.cell(anchos[4], 6, total_txt, 1, 0, "R")
+            self.cell(anchos[5], 6, total_txt, 1, 0, "R")
 
-            # 6. T. CAMBIO
+            # 7. T. CAMBIO
             tc_txt = f"{float(tc):,.2f}" if tc else "-"
-            self.cell(anchos[5], 6, tc_txt, 1, 0, "C")
+            self.cell(anchos[6], 6, tc_txt, 1, 0, "C")
 
-            # 7. ESTADO
+            # 8. ESTADO
             es_ok = em.get("status") == "OK"
             self.set_text_color(*(VERDE_OK if es_ok else ROJO_ERR))
             self.set_font("Arial", "B", 8)
             txt_status = _limpiar_latin1(
                 estado_corto(em.get("status"), em.get("error_msg", ""))
             )
-            self.cell(anchos[6], 6, txt_status, 1, 1, "C")
+            self.cell(anchos[7], 6, txt_status, 1, 1, "C")
             self.set_text_color(0, 0, 0)
             self.set_font("Arial", "", 8)
 
@@ -393,11 +399,13 @@ class ReporteContratosFijosRPA:
         descripcion_factura: str = "",
         moneda: str = "",
         tipo_cambio_usado=None,
+        cliente: str = "",
     ):
         """Agrega una emision de contrato fijo al lote del reporte.
 
-        tipo   : modo de emision ('facturar_completo' / 'porcentaje' / 'monto_parcial').
-        moneda : 'USD' / 'CRC' con que se emitio la factura.
+        cliente : nombre del cliente al que se le factura.
+        tipo    : modo de emision ('facturar_completo' / 'porcentaje' / 'monto_parcial').
+        moneda  : 'USD' / 'CRC' con que se emitio la factura.
         """
         total = (
             sum(float(ln.get("total_linea", 0) or 0.0) for ln in lineas)
@@ -414,6 +422,7 @@ class ReporteContratosFijosRPA:
         self.emisiones_procesadas.append(
             {
                 "compania": compania,
+                "cliente": cliente,
                 "factura": factura_num,
                 "tipo": tipo,
                 "lineas": lineas,
