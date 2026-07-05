@@ -45,10 +45,16 @@ from tipo_cambio import obtener_tipo_cambio
 #  CONFIGURACION
 # ════════════════════════════════════════════════════════════════════════════
 
-ENTORNO = "sandbox"            # "sandbox"  o  "produccion"
+# El ENTORNO ya NO se escribe aca: se lee de la variable QBO_ENTORNO del .env de
+# CADA maquina. Asi el mismo .py corre en local (sandbox) y en el VPS (produccion)
+# sin editar una sola linea. Default 'sandbox' = blindaje.
+#   .env local ->  QBO_ENTORNO=sandbox     |     .env VPS -> QBO_ENTORNO=produccion
+# --> se define ENTORNO mas abajo, despues de cargar el .env.
 
-LIMITE_FACTURAS = None         # None = todas.  1 = procesar solo UNA (util al pasar a prod).
-IGNORAR_DIA_EMISION = False    # True = ignora el filtro del dia (util SOLO para probar en sandbox).
+LIMITE_FACTURAS = None  # None = todas.  1 = procesar solo UNA (util al pasar a prod).
+IGNORAR_DIA_EMISION = (
+    False  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
+)
 
 # Si en PRODUCCION falta un impuesto del % que pide una linea:
 #   False (recomendado) -> NO lo crea; marca error. True -> lo crea.
@@ -61,6 +67,9 @@ load_dotenv()
 RUTA_ENV_WEBAPP = r"D:\Users\Usuario\Desktop\SX-Ecosystem\SX-Ecosystem\.env"
 if os.path.exists(RUTA_ENV_WEBAPP):
     load_dotenv(RUTA_ENV_WEBAPP, override=False)
+
+# Entorno tomado del .env de la maquina (default sandbox = blindaje).
+ENTORNO = os.getenv("QBO_ENTORNO", "sandbox").strip().lower()
 
 ENTORNOS = {
     "sandbox": {
@@ -80,15 +89,25 @@ ENTORNOS = {
         "client_secret": os.getenv("QBO_CLIENT_SECRET"),
         "realm_fijo": None,
         "cliente_fijo": None,
-        # TODO produccion: Id del item de contratos POR empresa.
+        # Item con el que se factura cada empresa en produccion (confirmado
+        # contra el catalogo real de QuickBooks de cada una):
+        #   - Soportexperto y Laitcorp: "CONTRATOS HORAS ADICIONALES".
+        #   - Hardware y Network NO tiene ese item; se usa "Venta de Servicios
+        #     y Proyectos" (Id 157). Casi nunca se factura contratos por esta
+        #     empresa, pero queda cubierto.
+        # NOTA (Fase 2): hoy el item es FIJO por empresa; luego se hara dinamico
+        # segun el tipo de servicio/clase de cada linea.
         "item_operaciones": {
-            "9130355360397996": "4",        # Soportexperto (confirmado)
-            "9130355360390096": "TODO",     # Hardware y Network
-            "9130355360394696": "TODO",     # Corporacion Latinoamericana
+            "9130355360397996": "3",  # Soportexperto  -> CONTRATOS HORAS ORDINARIAS
+            "9130355360390096": "157",  # Hardware y Network -> Venta de Servicios y Proyectos
+            "9130355360394696": "4",  # Laitcorp       -> CONTRATOS HORAS ORDINARIAS
         },
         "usar_moneda_real": True,
     },
 }
+
+if ENTORNO not in ENTORNOS:
+    sys.exit(f"QBO_ENTORNO invalido: '{ENTORNO}'. Use 'sandbox' o 'produccion'.")
 
 CFG = ENTORNOS[ENTORNO]
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -100,6 +119,7 @@ MONEDA_QBO = {"Dólares": "USD", "Dolares": "USD", "Colones": "CRC"}
 #  TOKENS
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def get_access_token(realm):
     f = CFG["tokens_file"]
     with open(f, "r", encoding="utf-8") as fh:
@@ -107,15 +127,23 @@ def get_access_token(realm):
     nodo = data if ENTORNO == "sandbox" else data["empresas"][realm]
     refresh_token = nodo["refresh_token"]
 
-    auth = base64.b64encode(f"{CFG['client_id']}:{CFG['client_secret']}".encode()).decode()
+    auth = base64.b64encode(
+        f"{CFG['client_id']}:{CFG['client_secret']}".encode()
+    ).decode()
     r = requests.post(
         "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
-        headers={"Authorization": f"Basic {auth}",
-                 "Content-Type": "application/x-www-form-urlencoded",
-                 "Accept": "application/json"},
-        data={"grant_type": "refresh_token", "refresh_token": refresh_token}, timeout=30)
+        headers={
+            "Authorization": f"Basic {auth}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        timeout=30,
+    )
     if r.status_code != 200:
-        raise RuntimeError(f"No se pudo refrescar token ({r.status_code}): {r.text[:200]}")
+        raise RuntimeError(
+            f"No se pudo refrescar token ({r.status_code}): {r.text[:200]}"
+        )
     nuevos = r.json()
     nodo["access_token"] = nuevos["access_token"]
     nodo["refresh_token"] = nuevos["refresh_token"]
@@ -128,13 +156,15 @@ def get_access_token(realm):
 #  BASE DE DATOS
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def leer_emisiones_listas(conn, periodo):
     """
     Emisiones en 'Lista' del mes indicado (periodo 'YYYY-MM'), sin factura aun,
     con los datos del contrato que el RPA necesita.
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT
                 em.id                AS emision_id,
                 em.mes_facturado,
@@ -157,25 +187,31 @@ def leer_emisiones_listas(conn, periodo):
               AND em.qbo_invoice_id IS NULL
               AND em.mes_facturado = %s
             ORDER BY c.compania_facturadora
-        """, (periodo,))
+        """,
+            (periodo,),
+        )
         return cur.fetchall()
 
 
 def leer_lineas_contrato(conn, contrato_id):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT descripcion, cantidad, monto_por_unidad, total_linea,
                    porcentaje_iva, exonerado
             FROM lineas_contrato
             WHERE contrato_id = %s
             ORDER BY orden
-        """, (contrato_id,))
+        """,
+            (contrato_id,),
+        )
         return cur.fetchall()
 
 
 def marcar_emitida(conn, emision_id, inv, tipo_cambio_usado):
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             UPDATE emisiones_cronograma
             SET estado = 'Emitida',
                 qbo_invoice_id = %s,
@@ -185,22 +221,31 @@ def marcar_emitida(conn, emision_id, inv, tipo_cambio_usado):
                 tipo_cambio_usado = %s,
                 qbo_sync_error = NULL
             WHERE id = %s AND estado = 'Lista'
-        """, (inv["Id"], inv.get("DocNumber"),
-              datetime.date.today().isoformat(),
-              tipo_cambio_usado, emision_id))
+        """,
+            (
+                inv["Id"],
+                inv.get("DocNumber"),
+                datetime.date.today().isoformat(),
+                tipo_cambio_usado,
+                emision_id,
+            ),
+        )
     conn.commit()
 
 
 def marcar_error(conn, emision_id, error):
     with conn.cursor() as cur:
-        cur.execute("UPDATE emisiones_cronograma SET qbo_sync_error = %s WHERE id = %s",
-                    (str(error)[:500], emision_id))
+        cur.execute(
+            "UPDATE emisiones_cronograma SET qbo_sync_error = %s WHERE id = %s",
+            (str(error)[:500], emision_id),
+        )
     conn.commit()
 
 
 # ════════════════════════════════════════════════════════════════════════════
 #  DIA DE EMISION  —  ajustado al mes
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def dia_objetivo_este_mes(dia_emision, hoy):
     """
@@ -219,11 +264,17 @@ def dia_objetivo_este_mes(dia_emision, hoy):
 #  IMPUESTOS DINAMICOS  (mismo criterio que operaciones: match por rate)
 # ════════════════════════════════════════════════════════════════════════════
 
+
 def _query_qbo(realm, token, sql):
-    url = (f"{CFG['base_url']}/v3/company/{realm}/query"
-           f"?query={requests.utils.quote(sql)}&minorversion=75")
-    return requests.get(url, headers={"Authorization": f"Bearer {token}",
-                                      "Accept": "application/json"}, timeout=30)
+    url = (
+        f"{CFG['base_url']}/v3/company/{realm}/query"
+        f"?query={requests.utils.quote(sql)}&minorversion=75"
+    )
+    return requests.get(
+        url,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        timeout=30,
+    )
 
 
 def _cargar_mapa_impuestos(realm, token):
@@ -254,18 +305,34 @@ def _cargar_mapa_impuestos(realm, token):
 def _crear_taxcode(porcentaje, realm, token):
     nombre = f"IVA {porcentaje}%"
     url = f"{CFG['base_url']}/v3/company/{realm}/taxservice/taxcode?minorversion=75"
-    payload = {"TaxCode": nombre,
-               "TaxRateDetails": [{"TaxRateName": nombre, "RateValue": porcentaje,
-                                   "TaxAgencyId": "1", "TaxApplicableOn": "Sales"}]}
-    r = requests.post(url, headers={"Authorization": f"Bearer {token}",
-                                    "Accept": "application/json",
-                                    "Content-Type": "application/json"},
-                      json=payload, timeout=30)
+    payload = {
+        "TaxCode": nombre,
+        "TaxRateDetails": [
+            {
+                "TaxRateName": nombre,
+                "RateValue": porcentaje,
+                "TaxAgencyId": "1",
+                "TaxApplicableOn": "Sales",
+            }
+        ],
+    }
+    r = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
     if r.status_code in (200, 201):
         tcid = r.json().get("TaxCodeId")
         TAX_CODES_CACHE.get(realm, {})[round(float(porcentaje), 2)] = tcid
         return tcid
-    raise RuntimeError(f"No se pudo crear impuesto {porcentaje}%: {r.status_code} {r.text[:200]}")
+    raise RuntimeError(
+        f"No se pudo crear impuesto {porcentaje}%: {r.status_code} {r.text[:200]}"
+    )
 
 
 def taxcode_para(porcentaje, realm, token):
@@ -282,12 +349,14 @@ def taxcode_para(porcentaje, realm, token):
         return _crear_taxcode(pct, realm, token)
     raise RuntimeError(
         f"La empresa no tiene configurado un impuesto del {pct}% en QuickBooks. "
-        f"Pedile al contador que lo cree (o habilita CREAR_IMPUESTOS_FALTANTES).")
+        f"Pedile al contador que lo cree (o habilita CREAR_IMPUESTOS_FALTANTES)."
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
 #  CONSTRUIR Y ENVIAR LA FACTURA
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def item_para(realm):
     it = CFG["item_operaciones"]
@@ -304,9 +373,9 @@ def convertir_monto(monto, moneda_contrato, invertir, tc_venta):
     """
     if not invertir or not tc_venta:
         return round(float(monto), 2)
-    if moneda_contrato in ("Dólares", "Dolares"):   # USD -> CRC
+    if moneda_contrato in ("Dólares", "Dolares"):  # USD -> CRC
         return round(float(monto) * tc_venta, 2)
-    else:                                            # CRC -> USD
+    else:  # CRC -> USD
         return round(float(monto) / tc_venta, 2)
 
 
@@ -327,7 +396,11 @@ def construir_factura(em, lineas, realm, token, tc_venta):
     invertir = bool(em.get("moneda_invertida"))
     moneda_contrato = em.get("moneda") or "Dólares"
     tipo = em["estado_emision"]
-    desc = em.get("emision_descripcion") or em.get("contrato_descripcion") or "Servicios contratados"
+    desc = (
+        em.get("emision_descripcion")
+        or em.get("contrato_descripcion")
+        or "Servicios contratados"
+    )
 
     lineas_qbo = []
     codigos_gravados = set()
@@ -343,30 +416,44 @@ def construir_factura(em, lineas, realm, token, tc_venta):
 
     if tipo == "facturar_completo":
         for ln in lineas:
-            amount = convertir_monto(ln["total_linea"], moneda_contrato, invertir, tc_venta)
-            lineas_qbo.append({
-                "DetailType": "SalesItemLineDetail",
-                "Amount": amount,
-                "Description": ln["descripcion"],
-                "SalesItemLineDetail": {
-                    "ItemRef": {"value": item_id},
-                    "Qty": float(ln["cantidad"]),
-                    "UnitPrice": convertir_monto(ln["monto_por_unidad"], moneda_contrato, invertir, tc_venta),
-                    "TaxCodeRef": {"value": ref_impuesto(ln["porcentaje_iva"], ln["exonerado"])},
-                },
-            })
+            amount = convertir_monto(
+                ln["total_linea"], moneda_contrato, invertir, tc_venta
+            )
+            lineas_qbo.append(
+                {
+                    "DetailType": "SalesItemLineDetail",
+                    "Amount": amount,
+                    "Description": ln["descripcion"],
+                    "SalesItemLineDetail": {
+                        "ItemRef": {"value": item_id},
+                        "Qty": float(ln["cantidad"]),
+                        "UnitPrice": convertir_monto(
+                            ln["monto_por_unidad"], moneda_contrato, invertir, tc_venta
+                        ),
+                        "TaxCodeRef": {
+                            "value": ref_impuesto(ln["porcentaje_iva"], ln["exonerado"])
+                        },
+                    },
+                }
+            )
     else:
         # porcentaje o monto_parcial -> UNA sola linea + nota explicativa
-        base_total = sum(float(l["total_linea"]) for l in lineas)  # subtotal del contrato
+        base_total = sum(
+            float(l["total_linea"]) for l in lineas
+        )  # subtotal del contrato
         if tipo == "porcentaje":
             pct = float(em.get("porcentaje_real") or 0)
             monto_base = base_total * pct / 100.0
-            nota_factura = (f"Facturacion parcial: {pct:g}% del contrato mensual "
-                            f"segun acuerdo con el cliente.")
+            nota_factura = (
+                f"Facturacion parcial: {pct:g}% del contrato mensual "
+                f"segun acuerdo con el cliente."
+            )
         else:  # monto_parcial
             monto_base = float(em.get("monto_real") or 0)
-            nota_factura = ("Facturacion parcial por monto acordado con el cliente "
-                            "para este periodo.")
+            nota_factura = (
+                "Facturacion parcial por monto acordado con el cliente "
+                "para este periodo."
+            )
 
         # IVA: se usa el % de la primera linea gravada como referencia del cobro parcial.
         primera_gravada = next((l for l in lineas if not l["exonerado"]), None)
@@ -374,17 +461,19 @@ def construir_factura(em, lineas, realm, token, tc_venta):
         exon = primera_gravada is None
 
         amount = convertir_monto(monto_base, moneda_contrato, invertir, tc_venta)
-        lineas_qbo.append({
-            "DetailType": "SalesItemLineDetail",
-            "Amount": amount,
-            "Description": desc,
-            "SalesItemLineDetail": {
-                "ItemRef": {"value": item_id},
-                "Qty": 1,
-                "UnitPrice": amount,
-                "TaxCodeRef": {"value": ref_impuesto(pct_iva, exon)},
-            },
-        })
+        lineas_qbo.append(
+            {
+                "DetailType": "SalesItemLineDetail",
+                "Amount": amount,
+                "Description": desc,
+                "SalesItemLineDetail": {
+                    "ItemRef": {"value": item_id},
+                    "Qty": 1,
+                    "UnitPrice": amount,
+                    "TaxCodeRef": {"value": ref_impuesto(pct_iva, exon)},
+                },
+            }
+        )
 
     factura = {"Line": lineas_qbo, "CustomerRef": {"value": str(customer)}}
 
@@ -394,9 +483,13 @@ def construir_factura(em, lineas, realm, token, tc_venta):
 
     # Sandbox: impuesto global (limitacion del sandbox gringo)
     if ENTORNO == "sandbox" and codigos_gravados:
-        factura["TxnTaxDetail"] = {"TxnTaxCodeRef": {"value": str(next(iter(codigos_gravados)))}}
+        factura["TxnTaxDetail"] = {
+            "TxnTaxCodeRef": {"value": str(next(iter(codigos_gravados)))}
+        }
         if len(codigos_gravados) > 1:
-            print("    [aviso sandbox] mezcla de % de IVA; en sandbox se aplica uno solo.")
+            print(
+                "    [aviso sandbox] mezcla de % de IVA; en sandbox se aplica uno solo."
+            )
 
     # Moneda: en produccion mandamos la moneda de la factura (invertida o no)
     if CFG["usar_moneda_real"]:
@@ -407,8 +500,11 @@ def construir_factura(em, lineas, realm, token, tc_venta):
 
 def enviar_factura(realm, token, factura):
     url = f"{CFG['base_url']}/v3/company/{realm}/invoice?minorversion=75"
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
-               "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
     r = requests.post(url, headers=headers, json=factura, timeout=30)
     if r.status_code not in (200, 201):
         raise RuntimeError(f"QBO {r.status_code}: {r.text[:300]}")
@@ -418,6 +514,7 @@ def enviar_factura(realm, token, factura):
 # ════════════════════════════════════════════════════════════════════════════
 #  LOG EN PDF
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def generar_pdf(resultados):
     try:
@@ -437,7 +534,12 @@ def generar_pdf(resultados):
     pdf.set_font("Helvetica", "", 9)
     pdf.cell(0, 6, f"Fecha: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}", ln=1)
     ok = sum(1 for r in resultados if r["ok"])
-    pdf.cell(0, 6, f"Total: {len(resultados)}   Facturadas: {ok}   Errores: {len(resultados)-ok}", ln=1)
+    pdf.cell(
+        0,
+        6,
+        f"Total: {len(resultados)}   Facturadas: {ok}   Errores: {len(resultados)-ok}",
+        ln=1,
+    )
     pdf.ln(3)
 
     for r in resultados:
@@ -447,7 +549,11 @@ def generar_pdf(resultados):
         pdf.set_font("Helvetica", "", 8)
         if r["ok"]:
             extra = f" | TC {r['tc']}" if r.get("tc") else ""
-            pdf.multi_cell(0, 5, f"   Factura QBO Id {r['qbo_invoice_id']} / DocNumber {r['qbo_doc_number']} / Total {r['total']}{extra}")
+            pdf.multi_cell(
+                0,
+                5,
+                f"   Factura QBO Id {r['qbo_invoice_id']} / DocNumber {r['qbo_doc_number']} / Total {r['total']}{extra}",
+            )
         else:
             pdf.multi_cell(0, 5, f"   {r['error']}")
         pdf.ln(1)
@@ -459,6 +565,7 @@ def generar_pdf(resultados):
 # ════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ════════════════════════════════════════════════════════════════════════════
+
 
 def validar_entorno():
     if ENTORNO not in ENTORNOS:
@@ -493,7 +600,7 @@ def main():
 
     conn = psycopg2.connect(DATABASE_URL)
     resultados = []
-    tc_dia = None   # se consulta solo si hace falta (alguna emision invertida)
+    tc_dia = None  # se consulta solo si hace falta (alguna emision invertida)
 
     try:
         emisiones = leer_emisiones_listas(conn, periodo)
@@ -506,7 +613,9 @@ def main():
             if IGNORAR_DIA_EMISION or (objetivo is not None and hoy.day == objetivo):
                 a_procesar.append(em)
             else:
-                print(f"  [espera] {em['compania_facturadora']}: dia objetivo {objetivo}, hoy {hoy.day}")
+                print(
+                    f"  [espera] {em['compania_facturadora']}: dia objetivo {objetivo}, hoy {hoy.day}"
+                )
 
         if LIMITE_FACTURAS is not None:
             a_procesar = a_procesar[:LIMITE_FACTURAS]
@@ -522,15 +631,31 @@ def main():
 
             if not realm or realm == "TODO":
                 marcar_error(conn, eid, "Empresa sin realm_id")
-                resultados.append({"ok": False, "cliente": cliente_lbl, "tipo": tipo, "error": "Empresa sin realm_id"})
+                resultados.append(
+                    {
+                        "ok": False,
+                        "cliente": cliente_lbl,
+                        "tipo": tipo,
+                        "error": "Empresa sin realm_id",
+                    }
+                )
                 print(f"  [SKIP] {cliente_lbl}: empresa sin realm")
                 continue
             if ENTORNO == "sandbox" and realm in REALMS_PRODUCCION:
-                sys.exit("BLINDAJE: en sandbox aparecio un realm de produccion. Abortando.")
+                sys.exit(
+                    "BLINDAJE: en sandbox aparecio un realm de produccion. Abortando."
+                )
             customer = CFG["cliente_fijo"] or em["qbo_customer_id"]
             if not customer:
                 marcar_error(conn, eid, "Contrato sin qbo_customer_id")
-                resultados.append({"ok": False, "cliente": cliente_lbl, "tipo": tipo, "error": "Sin qbo_customer_id"})
+                resultados.append(
+                    {
+                        "ok": False,
+                        "cliente": cliente_lbl,
+                        "tipo": tipo,
+                        "error": "Sin qbo_customer_id",
+                    }
+                )
                 print(f"  [SKIP] {cliente_lbl}: sin qbo_customer_id")
                 continue
 
@@ -540,7 +665,9 @@ def main():
                 if em.get("moneda_invertida"):
                     if tc_dia is None:
                         tc_dia = obtener_tipo_cambio()
-                        print(f"  Tipo de cambio del dia: venta {tc_dia['venta']} ({tc_dia['fuente']})")
+                        print(
+                            f"  Tipo de cambio del dia: venta {tc_dia['venta']} ({tc_dia['fuente']})"
+                        )
                     tc_venta = tc_dia["venta"]
 
                 if realm not in tokens:
@@ -550,13 +677,25 @@ def main():
                 inv = enviar_factura(realm, tokens[realm], factura)
 
                 marcar_emitida(conn, eid, inv, tc_venta)
-                resultados.append({"ok": True, "cliente": cliente_lbl, "tipo": tipo,
-                                   "qbo_invoice_id": inv["Id"], "qbo_doc_number": inv.get("DocNumber"),
-                                   "total": inv.get("TotalAmt"), "tc": tc_venta})
-                print(f"  [OK]   {cliente_lbl} ({tipo}): factura {inv.get('DocNumber')} total {inv.get('TotalAmt')}")
+                resultados.append(
+                    {
+                        "ok": True,
+                        "cliente": cliente_lbl,
+                        "tipo": tipo,
+                        "qbo_invoice_id": inv["Id"],
+                        "qbo_doc_number": inv.get("DocNumber"),
+                        "total": inv.get("TotalAmt"),
+                        "tc": tc_venta,
+                    }
+                )
+                print(
+                    f"  [OK]   {cliente_lbl} ({tipo}): factura {inv.get('DocNumber')} total {inv.get('TotalAmt')}"
+                )
             except Exception as e:
                 marcar_error(conn, eid, e)
-                resultados.append({"ok": False, "cliente": cliente_lbl, "tipo": tipo, "error": str(e)})
+                resultados.append(
+                    {"ok": False, "cliente": cliente_lbl, "tipo": tipo, "error": str(e)}
+                )
                 print(f"  [ERR]  {cliente_lbl}: {e}")
     finally:
         conn.close()

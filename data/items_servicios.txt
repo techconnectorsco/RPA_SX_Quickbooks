@@ -1,0 +1,63 @@
+  Id 124   | Inventory     | activo   | Fuente de poder. | precio 0 | cuenta: Gravadas
+  Id 125   | Inventory     | activo   | Grasa blanca. | precio 0 | cuenta: Gravadas
+  Id 126   | Inventory     | activo   | Impresora de inyección de tinta. | precio 0 | cuenta: Gravadas
+  Id 127   | Inventory     | activo   | Impresora láser. | precio 0 | cuenta: Gravadas
+  Id 128   | Inventory     | activo   | Impresoras. | precio 0 | cuenta: Gravadas
+  Id 129   | Inventory     | activo   | Llave maya. | precio 0 | cuenta: Gravadas
+  Id 130   | Inventory     | activo   | Maletines. | precio 0 | cuenta: Gravadas
+  Id 131   | Inventory     | activo   | Memorias RAM. | precio 0 | cuenta: Gravadas
+  Id 132   | Inventory     | activo   | Monitor. | precio 0 | cuenta: Gravadas
+  Id 133   | Inventory     | activo   | Mouse. | precio 0 | cuenta: Gravadas
+  Id 134   | Inventory     | activo   | Partes / Accesorios. | precio 0 | cuenta: Gravadas
+  Id 135   | Inventory     | activo   | Portátiles / Notebooks. | precio 0 | cuenta: Gravadas
+  Id 136   | Inventory     | activo   | Procesador. | precio 0 | cuenta: Gravadas
+  Id 137   | Inventory     | activo   | Router. | precio 0 | cuenta: Venta de Hadware
+  Id 138   | Inventory     | activo   | Soporte para monitor. | precio 0 | cuenta: Gravadas
+  Id 139   | Inventory     | activo   | Switch. | precio 0 | cuenta: Gravadas
+  Id 140   | Inventory     | activo   | Switch TP link. | precio 0 | cuenta: Gravadas
+  Id 141   | Inventory     | activo   | Tablet. | precio 0 | cuenta: Gravadas
+  Id 142   | Inventory     | activo   | Tarjeta madre. | precio 0 | cuenta: Gravadas
+  Id 143   | Inventory     | activo   | Tarjetas video red y sonido. | precio 0 | cuenta: Gravadas
+  Id 144   | Inventory     | activo   | Teclado. | precio 0 | cuenta: Gravadas
+  Id 145   | Inventory     | activo   | Teléfono móvil. | precio 0 | cuenta: Gravadas
+  Id 146   | Inventory     | activo   | Teléfonos. | precio 0 | cuenta: Gravadas
+  Id 147   | Inventory     | activo   | Tinta de impresión. | precio 0 | cuenta: Gravadas
+  Id 148   | Inventory     | activo   | Tinta impresión negra. | precio 0 | cuenta: Gravadas
+  Id 149   | Inventory     | activo   | Paquete software juegos. | precio 0 | cuenta: Venta de Software
+  Id 150   | Inventory     | activo   | Licencias01. | precio 0 | cuenta: Venta de Software
+  Id 151   | Service       | activo   | Licencias CSP | precio 0 | cuenta: Venta de Software
+  Id 152   | NonInventory  | activo   | SALDOS DE APERTURA | precio 0 | cuenta: Saldos de Apertura
+  Id 153   | Service       | activo   | Asistencia técnica para software | precio 0 | cuenta: Otros Servicios
+  Id 154   | Service       | activo   | Licencias ESET | precio 0 | cuenta: Venta de Software
+  Id 155   | Service       | activo   | LICENCIAS | precio 0 | cuenta: Venta de Software
+  Id 156   | Service       | activo   | Paquete de software de otras aplicaciones | precio 0 | cuenta: Services   [PARTES -ACCESORIOS PC:Paquete de software de otras aplicaciones]
+  Id 157   | Service       | activo   | Venta de Servicios y Proyectos | precio 0 | cuenta: Venta de Servicios y Proyectos
+
+  Total items en Hardware y Network S.A.: 83
+
+=== Corporacion Latinoamericana T.I. (Laitcorp)  (realm 9130355360394696) ===
+  Refrescando token...
+  Descargando items (solo lectura)...
+
+  Id 1     | Service       | activo   | Services | precio 0 | cuenta: Services
+  Id 2     | Service       | activo   | Hours | precio 0 | cuenta: Services
+  Id 4     | Service       | activo   | CONTRATOS HORAS ORDINARIAS | precio 0 | cuenta: Contratos
+  Id 5     | Service       | activo   | CONTRATOS HORAS ADICIONALES | precio 0 | cuenta: Horas Adicionales
+  Id 6     | Service       | activo   | PROYECTOS CON CONTRATO | precio 0 | cuenta: Contratos
+  Id 7     | Service       | activo   | PROYECTOS SIN CONTRATO | precio 0 | cuenta: Contratos
+  Id 8     | Service       | activo   | LICENCIAS | precio 0 | cuenta: Venta Software
+  Id 9     | Service       | activo   | HARDWARE | precio 0 | cuenta: Venta Hardware
+  Id 10    | Service       | activo   | INTERNACIONALES | precio 0 | cuenta: Otros Servicios relacionados
+  Id 11    | Service       | activo   | SOPORTE REMOTO | precio 0 | cuenta: Horas Soporte Remoto
+  Id 12    | Service       | activo   | TALLER | precio 0 | cuenta: Otros Servicios
+  Id 13    | Service       | activo   | HOSPEDAJE | precio 0 | cuenta: Mantenimiento y Hospedaje Web
+  Id 14    | Service       | activo   | OTROS SERVICIOS | precio 0 | cuenta: Otros Servicios
+  Id 15    | Service       | activo   | FLETE | precio 0 | cuenta: Otros Servicios
+  Id 16    | NonInventory  | activo   | SALDOS DE APERTURA | precio 60956.72 | cuenta: Saldo líquido inicial
+  Id 17    | Service       | activo   | Servicios de educación y capacitación, n.c.p. | precio 0 | cuenta: Services
+
+  Total items en Corporacion Latinoamericana T.I. (Laitcorp): 16
+
+======================================================================
+Listo. 118 items listados en total (las 3 empresas).
+======================================================================

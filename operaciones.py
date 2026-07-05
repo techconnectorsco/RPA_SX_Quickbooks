@@ -50,10 +50,17 @@ from generarlogpdf import ReporteFacturacionRPA
 from tipo_cambio import obtener_tipo_cambio
 
 # ════════════════════════════════════════════════════════════════════════════
-#  CONFIGURACION  —  lo unico que tocas para cambiar de entorno
+#  CONFIGURACION
 # ════════════════════════════════════════════════════════════════════════════
 
-ENTORNO = "sandbox"  # "sandbox"  o  "produccion"
+# El ENTORNO ya NO se escribe aca: se lee de la variable QBO_ENTORNO del .env de
+# CADA maquina. Asi el mismo .py corre en local (sandbox) y en el VPS (produccion)
+# sin editar una sola linea. Default 'sandbox' = blindaje: si nadie lo definio,
+# se asume sandbox y jamas se toca produccion por accidente.
+#   .env local ->  QBO_ENTORNO=sandbox
+#   .env VPS   ->  QBO_ENTORNO=produccion
+# (el .env NUNCA se copia entre maquinas; cada una manda sobre su propio entorno.)
+# --> se define ENTORNO mas abajo, despues de cargar el .env.
 
 LIMITE_FACTURAS = None  # None = todas las aprobadas.  1 = procesar solo UNA.
 MONTO_FIJO_PRUEBA = None  # None = monto real.  Ej: 100 = forzar monto chico
@@ -74,6 +81,9 @@ RUTA_ENV_WEBAPP = r"D:\Users\Usuario\Desktop\SX-Ecosystem\SX-Ecosystem\.env"
 if os.path.exists(RUTA_ENV_WEBAPP):
     load_dotenv(RUTA_ENV_WEBAPP, override=False)
 
+# Entorno tomado del .env de la maquina (default sandbox = blindaje).
+ENTORNO = os.getenv("QBO_ENTORNO", "sandbox").strip().lower()
+
 ENTORNOS = {
     "sandbox": {
         "base_url": "https://sandbox-quickbooks.api.intuit.com",
@@ -82,7 +92,7 @@ ENTORNOS = {
         "client_secret": os.getenv("QBO_SANDBOX_CLIENT_SECRET"),
         "realm_fijo": "9341456664539574",  # en sandbox todo va al unico sandbox
         "cliente_fijo": "58",  # cliente de prueba
-        "item_operaciones": "19",  # item "CONTRATOS HORAS ADICIONALES"
+        "item_operaciones": "19",  # item de prueba en sandbox
         "usar_moneda_real": False,  # sandbox no tiene multimoneda -> USD
     },
     "produccion": {
@@ -92,16 +102,24 @@ ENTORNOS = {
         "client_secret": os.getenv("QBO_CLIENT_SECRET"),
         "realm_fijo": None,  # usa el realm real de cada empresa
         "cliente_fijo": None,  # usa el qbo_customer_id de la operacion
-        # TODO produccion: el Id del item "CONTRATOS HORAS ADICIONALES" POR empresa.
-        #  (en Soportexperto lo vimos = "4"; los otros dos hay que buscarlos)
+        # Item con el que se factura cada empresa en produccion (confirmado
+        # contra el catalogo real de QuickBooks de cada una):
+        #   - Soportexperto y Laitcorp: "CONTRATOS HORAS ADICIONALES".
+        #   - Hardware y Network NO tiene ese item; se usa "Venta de Servicios
+        #     y Proyectos" (Id 157), el item de servicio generico de esa empresa.
+        # NOTA (Fase 2): hoy el item es FIJO por empresa. Mas adelante se hara
+        # dinamico segun el tipo de servicio/clase de cada linea.
         "item_operaciones": {
-            "9130355360397996": "4",  # Soportexperto (confirmado)
-            "9130355360390096": "TODO",  # Hardware y Network
-            "9130355360394696": "TODO",  # Corporacion Latinoamericana
+            "9130355360397996": "4",  # Soportexperto  -> CONTRATOS HORAS ADICIONALES
+            "9130355360390096": "157",  # Hardware y Network -> Venta de Servicios y Proyectos
+            "9130355360394696": "5",  # Laitcorp       -> CONTRATOS HORAS ADICIONALES
         },
         "usar_moneda_real": True,
     },
 }
+
+if ENTORNO not in ENTORNOS:
+    sys.exit(f"QBO_ENTORNO invalido: '{ENTORNO}'. Use 'sandbox' o 'produccion'.")
 
 CFG = ENTORNOS[ENTORNO]
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -338,8 +356,8 @@ def convertir_monto(monto, moneda_operacion, invertir, tc_venta):
     Devuelve el monto en la moneda en que se va a facturar.
     Si no se invierte, el monto queda igual (moneda de la operacion).
     Si se invierte:
-      - operacion USD -> factura CRC: multiplica por venta.
-      - operacion CRC -> factura USD: divide por venta.
+    - operacion USD -> factura CRC: multiplica por venta.
+    - operacion CRC -> factura USD: divide por venta.
     """
     if not invertir or not tc_venta:
         return round(float(monto), 2)
