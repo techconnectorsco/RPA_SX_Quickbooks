@@ -14,12 +14,26 @@ IVA DINAMICO:
   - En produccion, lo BUSCA entre los que ya configuro el contador; NO crea
     impuestos en la contabilidad real (salvo que se habilite a proposito).
 
+MONEDA / TIPO DE CAMBIO (NUEVO):
+  - Si la operacion tiene moneda_invertida = true, se factura en la moneda
+    CONTRARIA a la de la operacion, resolviendo el tipo de cambio (venta) del
+    dia con tipo_cambio.py (doble fuente: API publica + BCCR) y guardando la
+    tasa usada en tipo_cambio_usado.
+      Ej.: operacion en Dolares con el switch activado -> se factura en Colones
+           usando el tipo de cambio de venta de ESE momento.
+  - Si no esta invertida, se factura en la moneda propia de la operacion.
+  - El tipo de cambio se consulta UNA sola vez por corrida, y solo si hay al
+    menos una operacion invertida (para no pegarle al BCCR sin necesidad).
+
 SEGURIDAD:
   - En sandbox la URL es de sandbox y todo va al cliente/item de prueba.
   - Solo toca operaciones 'aprobada' sin factura todavia (idempotente).
   - Cada operacion se confirma por separado: si una falla, no afecta a las demas.
+  - QBO SOLO crea la factura (POST /invoice). No la envia al cliente ni a
+    Hacienda: la encargada la revisa y le da salida manualmente.
 
 Requiere (una vez):  pip install psycopg2-binary python-dotenv requests fpdf2
+                     (y para tipo_cambio real:  pip install bccr pandas)
 """
 
 import os
@@ -32,6 +46,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from generarlogpdf import ReporteFacturacionRPA
+
+from tipo_cambio import obtener_tipo_cambio
 
 # ════════════════════════════════════════════════════════════════════════════
 #  CONFIGURACION  —  lo unico que tocas para cambiar de entorno
@@ -147,7 +163,7 @@ def leer_operaciones_aprobadas(conn):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT o.id, o.qbo_customer_id, o.compania_facturadora, o.moneda,
-                   o.descripcion_factura, e.realm_id
+                   o.moneda_invertida, o.descripcion_factura, e.realm_id
             FROM operaciones o
             LEFT JOIN empresas e ON e.nombre = o.compania_facturadora
             WHERE o.estado = 'aprobada' AND o.qbo_invoice_id IS NULL
@@ -171,16 +187,23 @@ def leer_lineas(conn, operacion_id):
         return cur.fetchall()
 
 
-def marcar_facturada(conn, operacion_id, qbo_invoice_id, qbo_doc_number):
+def marcar_facturada(
+    conn, operacion_id, qbo_invoice_id, qbo_doc_number, tipo_cambio_usado
+):
+    """Marca la operacion como facturada y guarda la tasa usada (si hubo inversion).
+
+    tipo_cambio_usado va None cuando la operacion NO invierte moneda; en ese caso
+    la columna queda en NULL, que es lo correcto (no se uso ningun tipo de cambio).
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE operaciones
             SET estado = 'facturada', qbo_invoice_id = %s, qbo_doc_number = %s,
-                facturado_en = now(), qbo_sync_error = NULL
+                facturado_en = now(), tipo_cambio_usado = %s, qbo_sync_error = NULL
             WHERE id = %s AND estado = 'aprobada'
         """,
-            (qbo_invoice_id, qbo_doc_number, operacion_id),
+            (qbo_invoice_id, qbo_doc_number, tipo_cambio_usado, operacion_id),
         )
     conn.commit()
 
@@ -304,10 +327,39 @@ def taxcode_para(porcentaje, realm, token):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  CONSTRUIR Y ENVIAR LA FACTURA
+#  MONEDA / TIPO DE CAMBIO  —  mismo criterio que rpa_fijos.py
 # ════════════════════════════════════════════════════════════════════════════
 
 MONEDA_QBO = {"Dólares": "USD", "Dolares": "USD", "Colones": "CRC"}
+
+
+def convertir_monto(monto, moneda_operacion, invertir, tc_venta):
+    """
+    Devuelve el monto en la moneda en que se va a facturar.
+    Si no se invierte, el monto queda igual (moneda de la operacion).
+    Si se invierte:
+      - operacion USD -> factura CRC: multiplica por venta.
+      - operacion CRC -> factura USD: divide por venta.
+    """
+    if not invertir or not tc_venta:
+        return round(float(monto), 2)
+    if moneda_operacion in ("Dólares", "Dolares"):  # USD -> CRC
+        return round(float(monto) * tc_venta, 2)
+    else:  # CRC -> USD
+        return round(float(monto) / tc_venta, 2)
+
+
+def moneda_factura(moneda_operacion, invertir):
+    """Moneda (USD/CRC) en la que se emite la factura."""
+    base = MONEDA_QBO.get(moneda_operacion, "USD")
+    if not invertir:
+        return base
+    return "CRC" if base == "USD" else "USD"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  CONSTRUIR Y ENVIAR LA FACTURA
+# ════════════════════════════════════════════════════════════════════════════
 
 
 def item_para(realm):
@@ -315,11 +367,20 @@ def item_para(realm):
     return it if isinstance(it, str) else it.get(realm)
 
 
-def construir_factura(op, lineas, realm, token):
+def construir_factura(op, lineas, realm, token, tc_venta):
     customer = CFG["cliente_fijo"] or op["qbo_customer_id"]
     item_id = item_para(realm)
     if not item_id or item_id == "TODO":
         raise RuntimeError("Falta configurar el item de operaciones para esta empresa.")
+
+    moneda_op = op.get("moneda") or "Dólares"
+    invertir = bool(op.get("moneda_invertida"))
+
+    # El monto fijo de prueba es un valor pequeno y reversible (primer disparo
+    # en produccion -> nota de credito). NO se invierte, para que el numero y la
+    # moneda de la factura sean predecibles y el ejercicio sea 100% controlado.
+    if MONTO_FIJO_PRUEBA is not None:
+        invertir = False
 
     lineas_qbo = []
     codigos_gravados = set()  # taxcode ids usados (para el global del sandbox)
@@ -339,15 +400,21 @@ def construir_factura(op, lineas, realm, token):
             line_ref = "TAX"
         else:
             line_ref = str(code)
+
+        # Conversion de moneda (si la operacion esta invertida). El Qty (horas)
+        # NO se convierte: solo cambian los montos (Amount y UnitPrice).
+        amount_final = convertir_monto(amount, moneda_op, invertir, tc_venta)
+        unit_final = convertir_monto(unit, moneda_op, invertir, tc_venta)
+
         lineas_qbo.append(
             {
                 "DetailType": "SalesItemLineDetail",
-                "Amount": round(float(amount), 2),
+                "Amount": amount_final,
                 "Description": desc,
                 "SalesItemLineDetail": {
                     "ItemRef": {"value": item_id},
                     "Qty": float(qty),
-                    "UnitPrice": float(unit),
+                    "UnitPrice": unit_final,
                     "TaxCodeRef": {"value": line_ref},
                 },
             }
@@ -389,10 +456,12 @@ def construir_factura(op, lineas, realm, token):
                 "se aplica uno solo. En produccion sale correcto."
             )
 
-    if CFG["usar_moneda_real"] and op.get("moneda"):
-        cur = MONEDA_QBO.get(op["moneda"])
-        if cur:
-            factura["CurrencyRef"] = {"value": cur}
+    # Moneda: en produccion mandamos la moneda de la factura (invertida o no).
+    # En sandbox usar_moneda_real es False -> no se manda CurrencyRef (el
+    # sandbox gringo no tiene multimoneda), pero los MONTOS ya salen convertidos,
+    # asi se puede verificar la aritmetica del tipo de cambio en las pruebas.
+    if CFG["usar_moneda_real"]:
+        factura["CurrencyRef"] = {"value": moneda_factura(moneda_op, invertir)}
 
     return factura
 
@@ -498,6 +567,7 @@ def main():
     reporte = ReporteFacturacionRPA(entorno=ENTORNO)
 
     conn = None
+    tc_dia = None  # se consulta solo si hace falta (alguna operacion invertida)
     try:
         conn = psycopg2.connect(DATABASE_URL)
         operaciones = leer_operaciones_aprobadas(conn)
@@ -560,14 +630,27 @@ def main():
 
             # Proceso de facturación activa
             try:
+                # Tipo de cambio: solo si ESTA operacion invierte moneda.
+                # (Con MONTO_FIJO_PRUEBA no se invierte, asi que ni se consulta:
+                #  el ejercicio de prueba no debe depender de que el BCCR responda.)
+                tc_venta = None
+                if op.get("moneda_invertida") and MONTO_FIJO_PRUEBA is None:
+                    if tc_dia is None:
+                        tc_dia = obtener_tipo_cambio()
+                        print(
+                            f"  Tipo de cambio del dia: venta {tc_dia['venta']} "
+                            f"({tc_dia['fuente']})"
+                        )
+                    tc_venta = tc_dia["venta"]
+
                 if realm not in tokens:
                     tokens[realm] = get_access_token(realm)
 
                 lineas = leer_lineas(conn, oid)
-                factura = construir_factura(op, lineas, realm, tokens[realm])
+                factura = construir_factura(op, lineas, realm, tokens[realm], tc_venta)
                 inv = enviar_factura(realm, tokens[realm], factura)
 
-                marcar_facturada(conn, oid, inv["Id"], inv.get("DocNumber"))
+                marcar_facturada(conn, oid, inv["Id"], inv.get("DocNumber"), tc_venta)
 
                 # 3. ÉXITO: Registramos la operación (ESTÁ PERFECTO)
                 reporte.registrar_operacion(
@@ -578,8 +661,10 @@ def main():
                     status="OK",
                     descripcion_factura=op.get("descripcion_factura", "-"),
                 )
+                tc_txt = f" TC {tc_venta}" if tc_venta else ""
                 print(
-                    f"  [OK]   {oid}: factura {inv.get('DocNumber')} total {inv.get('TotalAmt')}"
+                    f"  [OK]   {oid}: factura {inv.get('DocNumber')} "
+                    f"total {inv.get('TotalAmt')}{tc_txt}"
                 )
 
             except Exception as e:
