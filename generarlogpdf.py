@@ -46,7 +46,7 @@ GRIS_FONDO = (248, 249, 250)
 
 # Tope FIJO de caracteres para la celda de descripcion. Medido para 152 mm en
 # Arial 8: el texto normal entra ~114; se usa 100 como corte seguro y prolijo.
-MAX_CHARS_DESCRIPCION = 110
+MAX_CHARS_DESCRIPCION = 100
 
 # Abreviaturas de empresa (por si la compania llega con el nombre largo).
 # Se hace por "contiene" para tolerar variaciones ("S.A.", tildes, etc.).
@@ -340,7 +340,13 @@ class LogFacturacionPDF(FPDF):
             # Consolidamos los datos numéricos de las líneas para la fila única
             lineas = op.get("lineas", [])
             total_horas = sum(float(ln.get("horas_trabajadas", 0)) for ln in lineas)
-            total_factura = sum(float(ln.get("total_linea", 0)) for ln in lineas)
+
+            # TOTAL: el monto REAL que QuickBooks registro en la factura
+            # (ya convertido de moneda si hubo inversion, ya con el %/parcial
+            #  aplicado y con el IVA incluido). Es la unica fuente confiable.
+            # Si por algun motivo no viniera (ej. filas de error), queda en 0.
+            total_qb = op.get("total_qb")
+            total_factura = float(total_qb) if total_qb is not None else 0.0
 
             moneda = op.get("moneda") or ("USD" if op.get("status") == "OK" else "")
             tc = op.get("tipo_cambio_usado")
@@ -354,7 +360,7 @@ class LogFacturacionPDF(FPDF):
             self.cell(anchos[1], 6, abreviar_empresa(op.get("compania")), 1, 0, "L")
 
             # 3. CLIENTE (a quien se factura; truncado al ancho de la celda)
-            cliente_txt = _limpiar_latin1((op.get("cliente") or "-"))[:35]
+            cliente_txt = _limpiar_latin1((op.get("cliente") or "-"))[:23]
             self.cell(anchos[2], 6, cliente_txt, 1, 0, "L")
 
             # 4. DESCRIPCIÓN (concatenada de las lineas, truncada fija)
@@ -371,7 +377,7 @@ class LogFacturacionPDF(FPDF):
                 "C",
             )
 
-            # 6. TOTAL (con moneda dinamica)
+            # 6. TOTAL (monto real de QBO + moneda dinamica)
             total_txt = f"{formato_moneda(total_factura)} {moneda}".strip()
             self.cell(anchos[5], 6, total_txt, 1, 0, "R")
 
@@ -419,18 +425,25 @@ class ReporteFacturacionRPA:
         moneda: str = "",
         tipo_cambio_usado=None,
         cliente: str = "",
+        total_qb=None,
     ):
         """Agrega los datos recolectados de una operación al lote del reporte.
 
         cliente           : nombre del cliente al que se le factura (SAMESA, etc.).
         moneda            : 'USD' / 'CRC' con que se emitio la factura (dinamica).
         tipo_cambio_usado : tasa de venta usada si hubo inversion; None si no hubo.
+        total_qb          : TotalAmt real que devolvio QuickBooks (ya convertido,
+                            con %/parcial aplicado y con IVA). Fuente del total.
         """
-        total_op = (
-            sum(float(ln.get("total_linea", 0) or 0.0) for ln in lineas)
-            if lineas
-            else 0.0
-        )
+        # Para el acumulado usamos el total REAL de QBO cuando existe.
+        if total_qb is not None:
+            total_op = float(total_qb)
+        else:
+            total_op = (
+                sum(float(ln.get("total_linea", 0) or 0.0) for ln in lineas)
+                if lineas
+                else 0.0
+            )
 
         if status == "OK":
             self.exitosas += 1
@@ -450,6 +463,7 @@ class ReporteFacturacionRPA:
                 "descripcion_factura": descripcion_factura,
                 "moneda": moneda,
                 "tipo_cambio_usado": tipo_cambio_usado,
+                "total_qb": total_qb,
             }
         )
 

@@ -39,7 +39,7 @@ GRIS_FONDO = (248, 249, 250)
 
 # Tope FIJO de caracteres para la descripcion. La celda es mas ancha que en
 # operaciones (no hay columna HORAS), asi que admite mas texto.
-MAX_CHARS_DESCRIPCION = 125
+MAX_CHARS_DESCRIPCION = 135
 
 ABREVIATURAS_EMPRESA = [
     ("hardware", "H&N"),
@@ -330,7 +330,10 @@ class LogContratosFijosPDF(FPDF):
             self.set_x(10)
 
             lineas = em.get("lineas", [])
-            total_factura = sum(float(ln.get("total_linea", 0)) for ln in lineas)
+            # TOTAL: monto REAL registrado por QuickBooks (convertido, con
+            # %/parcial aplicado y con IVA). Unica fuente confiable.
+            total_qb = em.get("total_qb")
+            total_factura = float(total_qb) if total_qb is not None else 0.0
             moneda = em.get("moneda") or ("USD" if em.get("status") == "OK" else "")
             tc = em.get("tipo_cambio_usado")
 
@@ -343,7 +346,7 @@ class LogContratosFijosPDF(FPDF):
             self.cell(anchos[1], 6, abreviar_empresa(em.get("compania")), 1, 0, "L")
 
             # 3. CLIENTE (a quien se factura; truncado al ancho de la celda)
-            cliente_txt = _limpiar_latin1((em.get("cliente") or "-"))[:35]
+            cliente_txt = _limpiar_latin1((em.get("cliente") or "-"))[:23]
             self.cell(anchos[2], 6, cliente_txt, 1, 0, "L")
 
             # 4. TIPO (modo de emision)
@@ -400,18 +403,23 @@ class ReporteContratosFijosRPA:
         moneda: str = "",
         tipo_cambio_usado=None,
         cliente: str = "",
+        total_qb=None,
     ):
         """Agrega una emision de contrato fijo al lote del reporte.
 
         cliente : nombre del cliente al que se le factura.
         tipo    : modo de emision ('facturar_completo' / 'porcentaje' / 'monto_parcial').
         moneda  : 'USD' / 'CRC' con que se emitio la factura.
+        total_qb: TotalAmt real de QuickBooks (ya convertido, con %/parcial y IVA).
         """
-        total = (
-            sum(float(ln.get("total_linea", 0) or 0.0) for ln in lineas)
-            if lineas
-            else 0.0
-        )
+        if total_qb is not None:
+            total = float(total_qb)
+        else:
+            total = (
+                sum(float(ln.get("total_linea", 0) or 0.0) for ln in lineas)
+                if lineas
+                else 0.0
+            )
 
         if status == "OK":
             self.exitosas += 1
@@ -431,6 +439,7 @@ class ReporteContratosFijosRPA:
                 "descripcion_factura": descripcion_factura,
                 "moneda": moneda,
                 "tipo_cambio_usado": tipo_cambio_usado,
+                "total_qb": total_qb,
             }
         )
 

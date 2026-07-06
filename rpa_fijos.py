@@ -176,6 +176,7 @@ def leer_emisiones_listas(conn, periodo):
                 em.moneda_invertida,
                 c.id                 AS contrato_id,
                 c.qbo_customer_id,
+                c.nombre_cliente,
                 c.compania_facturadora,
                 c.moneda,
                 c.dia_emision,
@@ -579,7 +580,9 @@ def main():
             eid = em["emision_id"]
             realm = realm_de(em)
             cliente_lbl = em.get("compania_facturadora", "")
-            cliente_nom = em.get("cliente", "") or "-"  # cliente al que se factura
+            cliente_nom = (
+                em.get("nombre_cliente", "") or "-"
+            )  # cliente al que se factura
             tipo = em["estado_emision"]
             desc_fact = (
                 em.get("emision_descripcion") or em.get("contrato_descripcion") or "-"
@@ -659,6 +662,7 @@ def main():
                     descripcion_factura=desc_fact,
                     moneda=moneda_emitida,
                     tipo_cambio_usado=tc_venta,
+                    total_qb=inv.get("TotalAmt"),
                 )
                 print(
                     f"  [OK]   {cliente_lbl} ({tipo}): factura {inv.get('DocNumber')} total {inv.get('TotalAmt')}"

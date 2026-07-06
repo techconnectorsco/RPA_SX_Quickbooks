@@ -690,6 +690,7 @@ def main():
                     descripcion_factura=op.get("descripcion_factura", "-"),
                     moneda=moneda_emitida,
                     tipo_cambio_usado=tc_venta,
+                    total_qb=inv.get("TotalAmt"),
                 )
                 tc_txt = f" TC {tc_venta}" if tc_venta else ""
                 print(
