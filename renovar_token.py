@@ -31,9 +31,6 @@ from dotenv import load_dotenv
 
 # ── Carga de variables de entorno ────────────────────────────────────────────
 load_dotenv()  # .env de esta carpeta (llaves QBO y, opcional, QBO_ENTORNO)
-RUTA_ENV_WEBAPP = r"D:\Users\Usuario\Desktop\SX-Ecosystem\SX-Ecosystem\.env"
-if os.path.exists(RUTA_ENV_WEBAPP):
-    load_dotenv(RUTA_ENV_WEBAPP, override=False)
 
 # ENTORNO desde el .env de LA MAQUINA. Default 'sandbox' = blindaje: si nadie
 # lo puso explicitamente, se asume sandbox y NO se toca produccion.

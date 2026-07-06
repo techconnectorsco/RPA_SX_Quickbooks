@@ -76,10 +76,11 @@ CREAR_IMPUESTOS_FALTANTES = False
 TAX_CODES_CACHE = {}
 
 # ── Entornos ────────────────────────────────────────────────────────────────
+# Toda la config sale del .env de LA carpeta de este RPA (una por maquina):
+#   DATABASE_URL, QBO_ENTORNO y las llaves QBO. El .env NO se sube al repo y NO
+#   se copia entre maquinas: en local apunta a la base/sandbox de pruebas, y en
+#   el VPS a la base/produccion. Asi el mismo codigo corre en ambos sitios.
 load_dotenv()
-RUTA_ENV_WEBAPP = r"D:\Users\Usuario\Desktop\SX-Ecosystem\SX-Ecosystem\.env"
-if os.path.exists(RUTA_ENV_WEBAPP):
-    load_dotenv(RUTA_ENV_WEBAPP, override=False)
 
 # Entorno tomado del .env de la maquina (default sandbox = blindaje).
 ENTORNO = os.getenv("QBO_ENTORNO", "sandbox").strip().lower()

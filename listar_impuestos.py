@@ -31,9 +31,6 @@ from dotenv import load_dotenv
 
 # ── Configuracion ────────────────────────────────────────────────────────────
 load_dotenv()
-RUTA_ENV_WEBAPP = r"D:\Users\Usuario\Desktop\SX-Ecosystem\SX-Ecosystem\.env"
-if os.path.exists(RUTA_ENV_WEBAPP):
-    load_dotenv(RUTA_ENV_WEBAPP, override=False)
 
 # Blindaje: este script es de PRODUCCION y VPS. Exige el entorno explicito.
 ENTORNO = os.getenv("QBO_ENTORNO", "sandbox").strip().lower()

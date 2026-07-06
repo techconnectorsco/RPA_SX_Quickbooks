@@ -28,9 +28,6 @@ from dotenv import load_dotenv
 
 # ── Configuracion ────────────────────────────────────────────────────────────
 load_dotenv()  # .env de esta carpeta (QBO_CLIENT_ID / QBO_CLIENT_SECRET)
-RUTA_ENV_WEBAPP = r"D:\Users\Usuario\Desktop\SX-Ecosystem\SX-Ecosystem\.env"
-if os.path.exists(RUTA_ENV_WEBAPP):
-    load_dotenv(RUTA_ENV_WEBAPP, override=False)
 
 PROD_BASE_URL = "https://quickbooks.api.intuit.com"
 TOKENS_FILE = os.path.join("config", "tokens_empresas.json")
