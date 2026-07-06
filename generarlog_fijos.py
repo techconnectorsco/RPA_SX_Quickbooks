@@ -64,8 +64,10 @@ ERRORES_MAPEADOS = [
     ("sin lineas", "Sin lineas"),
     ("line is missing", "Sin lineas"),
     ("2020", "Sin lineas"),
-    ("no tiene configurado un impuesto", "Falta IVA"),
-    ("impuesto", "Falta IVA"),
+    ("iva no valido", "IVA Invalido"),
+    ("no esta configurado como impuesto", "IVA Invalido"),
+    ("no tiene configurado un impuesto", "IVA Invalido"),
+    ("impuesto", "IVA Invalido"),
     ("item", "Falta item QB"),
     ("timeout", "Error conexion"),
     ("timed out", "Error conexion"),
@@ -298,7 +300,7 @@ class LogContratosFijosPDF(FPDF):
         # Anchos (mm). Suman ~335. Sin HORAS; CLIENTE va tras EMPRESA.
         # FACTURA  EMPRESA  CLIENTE  TIPO  DESCRIPCION  TOTAL  T.CAMBIO  ESTADO
         # Anchos (mm). Suman ~334. FACTURA EMPRESA CLIENTE TIPO DESCRIPCION TOTAL T.CAMBIO ESTADO
-        anchos = [22, 25, 45, 25, 141, 35, 20, 22]
+        anchos = [24, 25, 31, 25, 150, 35, 22, 22]
         headers = [
             "FACTURA",
             "EMPRESA",

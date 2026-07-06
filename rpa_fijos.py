@@ -54,7 +54,7 @@ from generarlog_fijos import ReporteContratosFijosRPA
 
 LIMITE_FACTURAS = None  # None = todas.  1 = procesar solo UNA (util al pasar a prod).
 IGNORAR_DIA_EMISION = (
-    True  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
+    False  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
 )
 
 # Si en PRODUCCION falta un impuesto del % que pide una linea:
@@ -280,26 +280,60 @@ def _query_qbo(realm, token, sql):
 
 
 def _cargar_mapa_impuestos(realm, token):
+    """Mapa { porcentaje -> TaxCode Id } eligiendo SIEMPRE el codigo de VENTA.
+    Filtra: solo TaxCode activos, solo tasas de VENTA (descarta retenciones
+    'R'/'Compras'/RS-/RP-/RRI- y tasas negativas). Mismo criterio que
+    operaciones.py. 100% dinamico: si agregan un IVA de venta, lo toma solo.
+    Cache por realm."""
     if realm in TAX_CODES_CACHE:
         return TAX_CODES_CACHE[realm]
-    valor_de_rate = {}
+
+    # 1) TaxRate Id -> (porcentaje, nombre)
+    rate_info = {}
     r = _query_qbo(realm, token, "SELECT * FROM TaxRate")
     if r.status_code == 200:
         for tr in r.json().get("QueryResponse", {}).get("TaxRate", []):
             try:
-                valor_de_rate[tr["Id"]] = round(float(tr.get("RateValue", 0)), 2)
+                pct = round(float(tr.get("RateValue", 0)), 2)
             except (TypeError, ValueError):
-                pass
+                continue
+            rate_info[tr["Id"]] = (pct, (tr.get("Name") or ""))
+
+    def es_rate_de_venta(nombre_rate):
+        n = nombre_rate.lower()
+        if "(compras)" in n or "compra" in n:
+            return False
+        if n.startswith(("rs-", "rp-", "rri-", "rs ", "rp ", "rri ")):
+            return False
+        if "venta" in n:
+            return True
+        if n.startswith(("ss-", "sp-", "si", "spis")):
+            return True
+        return True
+
+    # 2) TaxCode activo de venta -> primer % positivo de venta
     mapa = {}
     r = _query_qbo(realm, token, "SELECT * FROM TaxCode")
     if r.status_code == 200:
         for tc in r.json().get("QueryResponse", {}).get("TaxCode", []):
+            if not tc.get("Active", True):
+                continue
+            nombre_tc = (tc.get("Name") or "").lower()
+            if nombre_tc.endswith(" r") or "retenc" in nombre_tc:
+                continue
             detalles = (tc.get("SalesTaxRateList") or {}).get("TaxRateDetail", [])
             for det in detalles:
                 rid = (det.get("TaxRateRef") or {}).get("value")
-                if rid in valor_de_rate:
-                    mapa.setdefault(valor_de_rate[rid], tc["Id"])
-                    break
+                if rid not in rate_info:
+                    continue
+                pct, nombre_rate = rate_info[rid]
+                if pct <= 0:
+                    continue
+                if not es_rate_de_venta(nombre_rate):
+                    continue
+                mapa.setdefault(pct, tc["Id"])
+                break
+
     TAX_CODES_CACHE[realm] = mapa
     return mapa
 
@@ -338,21 +372,28 @@ def _crear_taxcode(porcentaje, realm, token):
 
 
 def taxcode_para(porcentaje, realm, token):
+    """Devuelve el TaxCode Id de VENTA para un porcentaje. 'NON' si exento/0%.
+    Busca dinamicamente el codigo de VENTA (via _cargar_mapa_impuestos, que
+    filtra retenciones/inactivos). PRODUCCION: rechaza 'IVA no valido' si no hay
+    impuesto de venta para ese %. SANDBOX: lo crea para no frenar pruebas."""
     if porcentaje is None:
         return "NON"
     pct = round(float(porcentaje), 2)
     if pct == 0:
         return "NON"
+
     mapa = _cargar_mapa_impuestos(realm, token)
     if pct in mapa:
         return mapa[pct]
-    if ENTORNO == "sandbox" or CREAR_IMPUESTOS_FALTANTES:
-        print(f"    impuesto {pct}% no existe; creandolo...")
-        return _crear_taxcode(pct, realm, token)
-    raise RuntimeError(
-        f"La empresa no tiene configurado un impuesto del {pct}% en QuickBooks. "
-        f"Pedile al contador que lo cree (o habilita CREAR_IMPUESTOS_FALTANTES)."
-    )
+
+    if ENTORNO == "produccion":
+        raise RuntimeError(
+            f"IVA no valido: {pct}% no esta configurado como impuesto de venta "
+            f"para esta empresa en QuickBooks."
+        )
+
+    print(f"    impuesto {pct}% no existe en sandbox; creandolo...")
+    return _crear_taxcode(pct, realm, token)
 
 
 # ════════════════════════════════════════════════════════════════════════════

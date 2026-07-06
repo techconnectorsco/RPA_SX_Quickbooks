@@ -255,31 +255,78 @@ def _query_qbo(realm, token, sql):
 
 def _cargar_mapa_impuestos(realm, token):
     """Lee los impuestos YA configurados en la empresa y arma un mapa
-    { porcentaje -> TaxCode Id }. Se hace una vez por realm (cache)."""
+    { porcentaje -> TaxCode Id }, eligiendo SIEMPRE el codigo de VENTA.
+
+    El problema: una empresa tiene varios TaxCode con el mismo porcentaje (el de
+    venta, el de retencion 'R', inactivos, negativos, etc.). Para no agarrar el
+    equivocado, filtramos:
+      - Solo TaxCode ACTIVOS.
+      - Solo TaxRate de VENTA (los que en el nombre dicen 'Ventas', o cuyo
+        TaxCode dice 'IVA X%'); se descartan retenciones (RS-/RP-/RRI-/' R' /
+        'Compras') y cualquier tasa negativa o combinada (Exonerado 100%, etc.).
+    Asi es 100% dinamico: si manana agregan un IVA de venta nuevo, lo toma solo,
+    sin tocar codigo. Si no hay uno de venta valido para ese %, ese % no entra
+    al mapa (y la factura con ese % se rechaza como 'IVA no valido').
+    Se hace una vez por realm (cache)."""
     if realm in TAX_CODES_CACHE:
         return TAX_CODES_CACHE[realm]
 
-    # 1) TaxRate Id -> valor del porcentaje
-    valor_de_rate = {}
+    # 1) TaxRate Id -> (valor del porcentaje, nombre del rate)
+    rate_info = {}
     r = _query_qbo(realm, token, "SELECT * FROM TaxRate")
     if r.status_code == 200:
         for tr in r.json().get("QueryResponse", {}).get("TaxRate", []):
             try:
-                valor_de_rate[tr["Id"]] = round(float(tr.get("RateValue", 0)), 2)
+                pct = round(float(tr.get("RateValue", 0)), 2)
             except (TypeError, ValueError):
-                pass
+                continue
+            rate_info[tr["Id"]] = (pct, (tr.get("Name") or ""))
 
-    # 2) TaxCode -> su porcentaje de venta (via su TaxRate)
+    def es_rate_de_venta(nombre_rate):
+        """True si el TaxRate parece de VENTA (no retencion, no compra)."""
+        n = nombre_rate.lower()
+        # Descarta retenciones y compras explicitas
+        if "(compras)" in n or "compra" in n:
+            return False
+        if n.startswith(("rs-", "rp-", "rri-", "rs ", "rp ", "rri ")):
+            return False
+        # Marcadores claros de venta
+        if "venta" in n:
+            return True
+        if n.startswith(("ss-", "sp-", "si", "spis")):  # ventas del sistema CR
+            return True
+        # Si el nombre es 'IVA X% (Ventas)' ya entro arriba; para otros nombres
+        # neutrales (sin marca de compra/retencion) los aceptamos como venta.
+        return True
+
+    # 2) TaxCode -> su porcentaje de venta (via su TaxRate de venta)
+    #    Recorremos y para cada % nos quedamos con el PRIMER TaxCode activo cuyo
+    #    rate sea de venta y positivo.
     mapa = {}
     r = _query_qbo(realm, token, "SELECT * FROM TaxCode")
     if r.status_code == 200:
         for tc in r.json().get("QueryResponse", {}).get("TaxCode", []):
+            # Solo TaxCode activos
+            if not tc.get("Active", True):
+                continue
+            nombre_tc = (tc.get("Name") or "").lower()
+            # Descarta TaxCode de retencion por nombre (terminan en ' r' o traen 'retenc')
+            if nombre_tc.endswith(" r") or "retenc" in nombre_tc:
+                continue
+
             detalles = (tc.get("SalesTaxRateList") or {}).get("TaxRateDetail", [])
             for det in detalles:
                 rid = (det.get("TaxRateRef") or {}).get("value")
-                if rid in valor_de_rate:
-                    mapa.setdefault(valor_de_rate[rid], tc["Id"])  # 1er code con ese %
-                    break
+                if rid not in rate_info:
+                    continue
+                pct, nombre_rate = rate_info[rid]
+                # Solo tasas positivas y de venta
+                if pct <= 0:
+                    continue
+                if not es_rate_de_venta(nombre_rate):
+                    continue
+                mapa.setdefault(pct, tc["Id"])  # primer code de venta con ese %
+                break
 
     TAX_CODES_CACHE[realm] = mapa
     return mapa
@@ -321,8 +368,18 @@ def _crear_taxcode(porcentaje, realm, token):
 
 
 def taxcode_para(porcentaje, realm, token):
-    """Devuelve el TaxCode Id para un porcentaje (dinamico, cualquier valor).
-    'NON' si es exento o 0%."""
+    """Devuelve el TaxCode Id de VENTA para un porcentaje.
+    'NON' si es exento o 0%.
+
+    Busca DINAMICAMENTE en los impuestos configurados de la empresa (via
+    _cargar_mapa_impuestos, que ya filtra: solo activos, solo VENTA, sin
+    retenciones ni negativos). Asi, si agregan un IVA de venta nuevo en
+    QuickBooks, el RPA lo toma solo, sin tocar codigo.
+
+    PRODUCCION: si el porcentaje no tiene un impuesto de VENTA configurado, se
+    RECHAZA con "IVA no valido" (no se factura con algo no valido).
+    SANDBOX: si no existe, lo crea, para no frenar las pruebas.
+    """
     if porcentaje is None:
         return "NON"
     pct = round(float(porcentaje), 2)
@@ -333,15 +390,16 @@ def taxcode_para(porcentaje, realm, token):
     if pct in mapa:
         return mapa[pct]
 
-    # No hay impuesto con ese % configurado en la empresa
-    if ENTORNO == "sandbox" or CREAR_IMPUESTOS_FALTANTES:
-        print(f"    impuesto {pct}% no existe; creandolo...")
-        return _crear_taxcode(pct, realm, token)
+    # No hay un impuesto de VENTA con ese % en la empresa
+    if ENTORNO == "produccion":
+        raise RuntimeError(
+            f"IVA no valido: {pct}% no esta configurado como impuesto de venta "
+            f"para esta empresa en QuickBooks."
+        )
 
-    raise RuntimeError(
-        f"La empresa no tiene configurado un impuesto del {pct}% en QuickBooks. "
-        f"Pedile al contador que lo cree (o habilita CREAR_IMPUESTOS_FALTANTES)."
-    )
+    # SANDBOX: lo crea para poder seguir probando
+    print(f"    impuesto {pct}% no existe en sandbox; creandolo...")
+    return _crear_taxcode(pct, realm, token)
 
 
 # ════════════════════════════════════════════════════════════════════════════

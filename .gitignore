@@ -30,3 +30,4 @@ dist/
 *.csv
 *.xlsx
 *.json
+*.txt
