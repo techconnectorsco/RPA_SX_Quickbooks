@@ -57,6 +57,8 @@ from supabase_manager import (
     finalizar_y_reportar,
     ID_RPA_OPERACIONES,
 )
+from teams_notifier import enviar_tarjeta_ejecucion
+from teams_resumen import resumen_operaciones
 
 # ════════════════════════════════════════════════════════════════════════════
 #  CONFIGURACION
@@ -878,16 +880,35 @@ def main():
     status_global_ejecution["monto_total_crc"] = round(
         status_global_ejecution["monto_total_crc"], 2
     )
+    url_pdf = None
     try:
-        finalizar_y_reportar(
+        resultado = finalizar_y_reportar(
             status_global_ejecution,
             ruta_pdf_local=ruta_pdf,
             automatizacion_id=ID_RPA_OPERACIONES,
             subcarpeta="operaciones",
         )
+        if isinstance(resultado, dict):
+            url_pdf = resultado.get("url_pdf")
     except Exception as e_sup:
         # Un fallo al reportar metricas NUNCA debe tumbar la corrida de facturacion
         print(f"[aviso] No se pudo reportar a Supabase: {e_sup}")
+
+    # ── Notificacion a Microsoft Teams (tarjeta + boton al PDF) ──
+    # La URL del flujo sale del .env; si no esta, el modulo no notifica y sigue.
+    try:
+        hechos, texto_pie = resumen_operaciones(status_global_ejecution)
+        enviar_tarjeta_ejecucion(
+            webhook_url=os.getenv("TEAMS_WEBHOOK_URL"),
+            nombre_proceso="RPA Facturacion - Operaciones",
+            entorno=ENTORNO,
+            metricas=status_global_ejecution,
+            hechos_resumen=hechos,
+            url_pdf=url_pdf,
+            texto_pie=texto_pie,
+        )
+    except Exception as e_teams:
+        print(f"[aviso] No se pudo notificar a Teams: {e_teams}")
 
 
 if __name__ == "__main__":

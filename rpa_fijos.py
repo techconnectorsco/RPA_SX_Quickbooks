@@ -50,6 +50,8 @@ from supabase_manager import (
     finalizar_y_reportar,
     ID_RPA_FIJOS,
 )
+from teams_notifier import enviar_tarjeta_ejecucion
+from teams_resumen import resumen_contratos_fijos
 
 # ════════════════════════════════════════════════════════════════════════════
 #  CONFIGURACION
@@ -63,7 +65,7 @@ from supabase_manager import (
 
 LIMITE_FACTURAS = None  # None = todas.  1 = procesar solo UNA (util al pasar a prod).
 IGNORAR_DIA_EMISION = (
-    False  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
+    True  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
 )
 
 # Si en PRODUCCION falta un impuesto del % que pide una linea:
@@ -823,15 +825,33 @@ def main():
     status_global_ejecution["monto_total_crc"] = round(
         status_global_ejecution["monto_total_crc"], 2
     )
+    url_pdf = None
     try:
-        finalizar_y_reportar(
+        resultado = finalizar_y_reportar(
             status_global_ejecution,
             ruta_pdf_local=ruta_pdf,
             automatizacion_id=ID_RPA_FIJOS,
             subcarpeta="contratos_fijos",
         )
+        if isinstance(resultado, dict):
+            url_pdf = resultado.get("url_pdf")
     except Exception as e_sup:
         print(f"[aviso] No se pudo reportar a Supabase: {e_sup}")
+
+    # ── Notificacion a Microsoft Teams (tarjeta + boton al PDF) ──
+    try:
+        hechos, texto_pie = resumen_contratos_fijos(status_global_ejecution)
+        enviar_tarjeta_ejecucion(
+            webhook_url=os.getenv("TEAMS_WEBHOOK_URL"),
+            nombre_proceso="RPA Facturacion - Contratos Fijos",
+            entorno=ENTORNO,
+            metricas=status_global_ejecution,
+            hechos_resumen=hechos,
+            url_pdf=url_pdf,
+            texto_pie=texto_pie,
+        )
+    except Exception as e_teams:
+        print(f"[aviso] No se pudo notificar a Teams: {e_teams}")
 
 
 if __name__ == "__main__":

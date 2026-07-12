@@ -348,7 +348,7 @@ class LogContratosFijosPDF(FPDF):
             self.cell(anchos[1], 6, abreviar_empresa(em.get("compania")), 1, 0, "L")
 
             # 3. CLIENTE (a quien se factura; truncado al ancho de la celda)
-            cliente_txt = _limpiar_latin1((em.get("cliente") or "-"))[:23]
+            cliente_txt = _limpiar_latin1((em.get("cliente") or "-"))[:18]
             self.cell(anchos[2], 6, cliente_txt, 1, 0, "L")
 
             # 4. TIPO (modo de emision)

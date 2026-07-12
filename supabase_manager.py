@@ -70,7 +70,8 @@ def finalizar_y_reportar(
     try:
         res = supabase_db.table("ejecuciones").insert(datos_ejecucion).execute()
         print("[Supabase] Ejecucion reportada correctamente.")
-        return res.data
+        # Devolvemos tambien la URL del PDF para que el RPA pueda pasarla a Teams
+        return {"data": res.data, "url_pdf": url_log_publica}
     except Exception as e:
         print(f"[Supabase] Error al insertar ejecucion: {e}")
-        return None
+        return {"data": None, "url_pdf": url_log_publica}
