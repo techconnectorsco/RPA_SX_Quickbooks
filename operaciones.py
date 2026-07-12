@@ -49,6 +49,15 @@ from generarlogpdf import ReporteFacturacionRPA
 
 from tipo_cambio import obtener_tipo_cambio
 
+# ── Metricas / reporte a Supabase (mismo patron que los otros RPAs) ──────────
+import time
+from global_status import status_global_ejecution
+from supabase_manager import (
+    verificar_estado_rpa,
+    finalizar_y_reportar,
+    ID_RPA_OPERACIONES,
+)
+
 # ════════════════════════════════════════════════════════════════════════════
 #  CONFIGURACION
 # ════════════════════════════════════════════════════════════════════════════
@@ -613,6 +622,36 @@ def generar_pdf(resultados):
 # ════════════════════════════════════════════════════════════════════════════
 
 
+def clasificar_error_metricas(mensaje):
+    """Suma el error al contador correcto del status_global (metricas).
+    Mismo criterio que el mapeo de errores del PDF."""
+    m = (mensaje or "").lower()
+    if "sin lineas" in m or "line is missing" in m:
+        status_global_ejecution["err_sin_lineas"] += 1
+    elif "customer_id" in m or "sin cliente" in m:
+        status_global_ejecution["err_sin_cliente"] += 1
+    elif "realm" in m or "sin empresa" in m:
+        status_global_ejecution["err_sin_empresa"] += 1
+    elif "iva no valido" in m or "impuesto" in m:
+        status_global_ejecution["err_iva_invalido"] += 1
+    elif any(
+        k in m
+        for k in (
+            "timeout",
+            "timed out",
+            "connection",
+            "connect",
+            "max retries",
+            "name resolution",
+        )
+    ):
+        status_global_ejecution["err_conexion"] += 1
+    elif "token" in m or "401" in m or "unauthorized" in m:
+        status_global_ejecution["err_token"] += 1
+    else:
+        status_global_ejecution["err_otros"] += 1
+
+
 def validar_entorno():
     if ENTORNO not in ENTORNOS:
         sys.exit(f"ENTORNO invalido: {ENTORNO}")
@@ -632,6 +671,14 @@ def realm_de(op):
 
 def main():
     validar_entorno()
+
+    # Interruptor remoto (por ahora siempre True; queda listo para el futuro)
+    if not verificar_estado_rpa():
+        print("RPA desactivado administrativamente en Supabase. No se ejecuta.")
+        return
+
+    inicio = time.time()  # cronometro para tiempo_ejecucion
+
     print("=" * 60)
     print(f"RPA OPERACIONES  —  ENTORNO: {ENTORNO.upper()}")
     if MONTO_FIJO_PRUEBA is not None:
@@ -661,9 +708,13 @@ def main():
             cliente_lbl = op.get("compania_facturadora", "")
             cliente_nom = op.get("cliente", "") or "-"  # cliente al que se factura
 
+            status_global_ejecution["total_operaciones"] += 1
+
             # 1. Error: Empresa sin Realm
             if not realm or realm == "TODO":
                 marcar_error(conn, oid, "Empresa sin realm_id (no factura por QBO)")
+                status_global_ejecution["con_error"] += 1
+                status_global_ejecution["err_sin_empresa"] += 1
 
                 # >>> REGISTRO CORREGIDO CON DESCRIPCIÓN <<<
                 reporte.registrar_operacion(
@@ -691,6 +742,8 @@ def main():
             customer = CFG["cliente_fijo"] or op["qbo_customer_id"]
             if not customer:
                 marcar_error(conn, oid, "Operacion sin qbo_customer_id")
+                status_global_ejecution["con_error"] += 1
+                status_global_ejecution["err_sin_cliente"] += 1
 
                 # >>> REGISTRO CORREGIDO CON DESCRIPCIÓN <<<
                 reporte.registrar_operacion(
@@ -727,6 +780,12 @@ def main():
                     tokens[realm] = get_access_token(realm)
 
                 lineas = leer_lineas(conn, oid)
+
+                # Sin lineas no hay nada que facturar: QBO rechazaria con
+                # "Line is missing". Lo detectamos antes para un estado claro.
+                if not lineas:
+                    raise RuntimeError("Operacion sin lineas para facturar")
+
                 factura = construir_factura(op, lineas, realm, tokens[realm], tc_venta)
                 inv = enviar_factura(realm, tokens[realm], factura)
 
@@ -737,6 +796,19 @@ def main():
                 moneda_emitida = moneda_factura(
                     op.get("moneda") or "Dólares", bool(op.get("moneda_invertida"))
                 )
+
+                # --- Metricas de exito (monto real de QBO, por moneda) ---
+                status_global_ejecution["facturadas_ok"] += 1
+                try:
+                    _total = float(inv.get("TotalAmt") or 0)
+                except (TypeError, ValueError):
+                    _total = 0.0
+                if moneda_emitida == "CRC":
+                    status_global_ejecution["monto_total_crc"] += _total
+                else:
+                    status_global_ejecution["monto_total_usd"] += _total
+                if tc_venta:
+                    status_global_ejecution["facturas_con_cambio_moneda"] += 1
 
                 # 3. ÉXITO: Registramos la operación (con moneda y tipo de cambio)
                 reporte.registrar_operacion(
@@ -759,6 +831,8 @@ def main():
 
             except Exception as e:
                 marcar_error(conn, oid, e)
+                status_global_ejecution["con_error"] += 1
+                clasificar_error_metricas(str(e))
 
                 # 4. Error dinámico en el proceso de envío (ESTÁ PERFECTO)
                 # NOTA: Pasamos lineas=[] para que en errores muestre 0.00 en montos, lo cual es correcto.
@@ -790,6 +864,30 @@ def main():
     if ruta_pdf:
         print(f"Log PDF: {ruta_pdf}")
     print("=" * 60)
+
+    # ── Reporte de metricas a Supabase (mismo patron que los otros RPAs) ──
+    duracion = int(time.time() - inicio)
+    status_global_ejecution["tiempo_ejecucion"] = f"{duracion // 60}m {duracion % 60}s"
+    status_global_ejecution["entorno"] = ENTORNO
+    if MONTO_FIJO_PRUEBA is not None:
+        status_global_ejecution["tipo_ejecucion"] = "Prueba"
+    # Redondeo de montos para dejarlos limpios
+    status_global_ejecution["monto_total_usd"] = round(
+        status_global_ejecution["monto_total_usd"], 2
+    )
+    status_global_ejecution["monto_total_crc"] = round(
+        status_global_ejecution["monto_total_crc"], 2
+    )
+    try:
+        finalizar_y_reportar(
+            status_global_ejecution,
+            ruta_pdf_local=ruta_pdf,
+            automatizacion_id=ID_RPA_OPERACIONES,
+            subcarpeta="operaciones",
+        )
+    except Exception as e_sup:
+        # Un fallo al reportar metricas NUNCA debe tumbar la corrida de facturacion
+        print(f"[aviso] No se pudo reportar a Supabase: {e_sup}")
 
 
 if __name__ == "__main__":

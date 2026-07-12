@@ -42,6 +42,15 @@ from dotenv import load_dotenv
 from tipo_cambio import obtener_tipo_cambio
 from generarlog_fijos import ReporteContratosFijosRPA
 
+# ── Metricas / reporte a Supabase (mismo patron que los otros RPAs) ──────────
+import time
+from global_status_fijos import status_global_ejecution
+from supabase_manager import (
+    verificar_estado_rpa,
+    finalizar_y_reportar,
+    ID_RPA_FIJOS,
+)
+
 # ════════════════════════════════════════════════════════════════════════════
 #  CONFIGURACION
 # ════════════════════════════════════════════════════════════════════════════
@@ -577,8 +586,55 @@ def realm_de(em):
     return em.get("realm_id")
 
 
+def clasificar_error_metricas(mensaje):
+    """Suma el error al contador correcto del status_global (metricas)."""
+    m = (mensaje or "").lower()
+    if "sin lineas" in m or "line is missing" in m:
+        status_global_ejecution["err_sin_lineas"] += 1
+    elif "customer_id" in m or "sin cliente" in m:
+        status_global_ejecution["err_sin_cliente"] += 1
+    elif "realm" in m or "sin empresa" in m:
+        status_global_ejecution["err_sin_empresa"] += 1
+    elif "iva no valido" in m or "impuesto" in m:
+        status_global_ejecution["err_iva_invalido"] += 1
+    elif any(
+        k in m
+        for k in (
+            "timeout",
+            "timed out",
+            "connection",
+            "connect",
+            "max retries",
+            "name resolution",
+        )
+    ):
+        status_global_ejecution["err_conexion"] += 1
+    elif "token" in m or "401" in m or "unauthorized" in m:
+        status_global_ejecution["err_token"] += 1
+    else:
+        status_global_ejecution["err_otros"] += 1
+
+
+def _contar_tipo_emision(tipo):
+    """Suma la emision OK a su casilla de tipo (completo/porcentaje/parcial)."""
+    t = (tipo or "").strip().lower()
+    if "completo" in t:
+        status_global_ejecution["tipo_completo"] += 1
+    elif "porcentaje" in t:
+        status_global_ejecution["tipo_porcentaje"] += 1
+    elif "parcial" in t:
+        status_global_ejecution["tipo_parcial"] += 1
+
+
 def main():
     validar_entorno()
+
+    # Interruptor remoto (por ahora siempre True; queda listo para el futuro)
+    if not verificar_estado_rpa():
+        print("RPA desactivado administrativamente en Supabase. No se ejecuta.")
+        return
+
+    inicio = time.time()  # cronometro para tiempo_ejecucion
     hoy = datetime.date.today()
     periodo = f"{hoy.year}-{hoy.month:02d}"
 
@@ -608,13 +664,17 @@ def main():
             if IGNORAR_DIA_EMISION or (objetivo is not None and hoy.day == objetivo):
                 a_procesar.append(em)
             else:
+                status_global_ejecution["emisiones_en_espera"] += 1
                 print(
                     f"  [espera] {em['compania_facturadora']}: dia objetivo {objetivo}, hoy {hoy.day}"
                 )
 
+        status_global_ejecution["emisiones_listas"] = len(emisiones)
+
         if LIMITE_FACTURAS is not None:
             a_procesar = a_procesar[:LIMITE_FACTURAS]
 
+        status_global_ejecution["total_a_facturar"] = len(a_procesar)
         print(f"A facturar hoy: {len(a_procesar)}\n")
 
         tokens = {}
@@ -632,6 +692,8 @@ def main():
 
             if not realm or realm == "TODO":
                 marcar_error(conn, eid, "Empresa sin realm_id")
+                status_global_ejecution["con_error"] += 1
+                status_global_ejecution["err_sin_empresa"] += 1
                 reporte.registrar_emision(
                     compania=cliente_lbl,
                     cliente=cliente_nom,
@@ -651,6 +713,8 @@ def main():
             customer = CFG["cliente_fijo"] or em["qbo_customer_id"]
             if not customer:
                 marcar_error(conn, eid, "Contrato sin qbo_customer_id")
+                status_global_ejecution["con_error"] += 1
+                status_global_ejecution["err_sin_cliente"] += 1
                 reporte.registrar_emision(
                     compania=cliente_lbl,
                     cliente=cliente_nom,
@@ -694,6 +758,21 @@ def main():
                 moneda_emitida = moneda_factura(
                     em.get("moneda") or "Dólares", bool(em.get("moneda_invertida"))
                 )
+
+                # --- Metricas de exito ---
+                status_global_ejecution["facturadas_ok"] += 1
+                _contar_tipo_emision(tipo)
+                try:
+                    _total = float(inv.get("TotalAmt") or 0)
+                except (TypeError, ValueError):
+                    _total = 0.0
+                if moneda_emitida == "CRC":
+                    status_global_ejecution["monto_total_crc"] += _total
+                else:
+                    status_global_ejecution["monto_total_usd"] += _total
+                if tc_venta:
+                    status_global_ejecution["facturas_con_cambio_moneda"] += 1
+
                 reporte.registrar_emision(
                     compania=cliente_lbl,
                     cliente=cliente_nom,
@@ -711,6 +790,8 @@ def main():
                 )
             except Exception as e:
                 marcar_error(conn, eid, e)
+                status_global_ejecution["con_error"] += 1
+                clasificar_error_metricas(str(e))
                 reporte.registrar_emision(
                     compania=cliente_lbl,
                     cliente=cliente_nom,
@@ -731,6 +812,26 @@ def main():
     if ruta_pdf:
         print(f"Log PDF: {ruta_pdf}")
     print("=" * 60)
+
+    # ── Reporte de metricas a Supabase (mismo patron que los otros RPAs) ──
+    duracion = int(time.time() - inicio)
+    status_global_ejecution["tiempo_ejecucion"] = f"{duracion // 60}m {duracion % 60}s"
+    status_global_ejecution["entorno"] = ENTORNO
+    status_global_ejecution["monto_total_usd"] = round(
+        status_global_ejecution["monto_total_usd"], 2
+    )
+    status_global_ejecution["monto_total_crc"] = round(
+        status_global_ejecution["monto_total_crc"], 2
+    )
+    try:
+        finalizar_y_reportar(
+            status_global_ejecution,
+            ruta_pdf_local=ruta_pdf,
+            automatizacion_id=ID_RPA_FIJOS,
+            subcarpeta="contratos_fijos",
+        )
+    except Exception as e_sup:
+        print(f"[aviso] No se pudo reportar a Supabase: {e_sup}")
 
 
 if __name__ == "__main__":
