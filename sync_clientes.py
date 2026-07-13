@@ -19,17 +19,23 @@ import os
 import json
 import base64
 import sys
+import time
 
 import requests
 import psycopg2
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
+# ── Notificacion a Teams (mismos modulos que los otros RPAs) ─────────────────
+from teams_notifier import enviar_tarjeta_ejecucion
+from teams_resumen import resumen_sync_clientes
+
 # ── Configuracion ────────────────────────────────────────────────────────────
-load_dotenv()  # .env de esta carpeta (QBO_CLIENT_ID / QBO_CLIENT_SECRET)
-RUTA_ENV_WEBAPP = r"C:\RPA_SX_Quickbooks\.env"
-if os.path.exists(RUTA_ENV_WEBAPP):
-    load_dotenv(RUTA_ENV_WEBAPP, override=False)  # de aqui sale DATABASE_URL
+# Toda la config sale del .env de LA carpeta de este RPA (una por maquina):
+#   DATABASE_URL y las llaves QBO. El .env NO se sube al repo y NO se copia entre
+#   maquinas: en el VPS apunta a la base de produccion. Mismo criterio que los
+#   demas RPAs, sin rutas clavadas al sistema.
+load_dotenv()
 
 PROD_BASE_URL = "https://quickbooks.api.intuit.com"
 TOKENS_FILE = os.path.join("config", "tokens_empresas.json")
@@ -150,35 +156,88 @@ def main():
         print("[ERROR] Falta QBO_CLIENT_ID / QBO_CLIENT_SECRET en el .env.")
         sys.exit(1)
     if not DATABASE_URL:
-        print("[ERROR] Falta DATABASE_URL (revisa RUTA_ENV_WEBAPP).")
+        print("[ERROR] Falta DATABASE_URL en el .env de esta carpeta.")
         sys.exit(1)
 
     print("=" * 60)
     print("SYNC ESPEJO DE CLIENTES (QuickBooks -> clientes_quickbooks)")
     print("=" * 60)
 
+    inicio = time.time()  # cronometro para la duracion
+
+    # Metricas de la corrida (para la tarjeta de Teams)
+    metricas = {
+        "total_sincronizados": 0,
+        "empresas_total": len(EMPRESAS),
+        "empresas_ok": 0,
+        "detalle_por_empresa": [],  # [{nombre, clientes}]
+        "empresas_saltadas": [],  # [{nombre, motivo}]
+        "tiempo_ejecucion": None,
+    }
+
     conn = psycopg2.connect(DATABASE_URL)
     total = 0
     try:
         for emp in EMPRESAS:
             print(f"\n=== {emp['nombre']} ===")
-            print("  Refrescando token...")
-            token = refrescar_token(emp["realm"])
-            if not token:
-                print("  [SALTADA] no se pudo refrescar el token.")
-                continue
-            print("  Descargando clientes (solo lectura)...")
-            clientes = descargar_clientes(emp["realm"], token)
-            print(f"  {len(clientes)} clientes en QuickBooks.")
-            n = guardar(conn, emp["empresa_id"], clientes)
-            print(f"  Guardados/actualizados en la tabla espejo: {n}")
-            total += n
+            try:
+                print("  Refrescando token...")
+                token = refrescar_token(emp["realm"])
+                if not token:
+                    print("  [SALTADA] no se pudo refrescar el token.")
+                    metricas["empresas_saltadas"].append(
+                        {"nombre": emp["nombre"], "motivo": "token invalido"}
+                    )
+                    continue
+
+                print("  Descargando clientes (solo lectura)...")
+                clientes = descargar_clientes(emp["realm"], token)
+                print(f"  {len(clientes)} clientes en QuickBooks.")
+                n = guardar(conn, emp["empresa_id"], clientes)
+                print(f"  Guardados/actualizados en la tabla espejo: {n}")
+
+                total += n
+                metricas["total_sincronizados"] += n
+                metricas["empresas_ok"] += 1
+                metricas["detalle_por_empresa"].append(
+                    {"nombre": emp["nombre"], "clientes": n}
+                )
+            except Exception as e:
+                # Un error en una empresa NO detiene a las demas
+                print(f"  [ERROR] {emp['nombre']}: {e}")
+                metricas["empresas_saltadas"].append(
+                    {"nombre": emp["nombre"], "motivo": str(e)[:80]}
+                )
     finally:
         conn.close()
 
     print("\n" + "=" * 60)
     print(f"Listo. {total} clientes en total en clientes_quickbooks.")
     print("=" * 60)
+
+    # ── Notificacion a Teams ──
+    duracion = int(time.time() - inicio)
+    metricas["tiempo_ejecucion"] = f"{duracion // 60}m {duracion % 60}s"
+
+    # Color de la tarjeta: verde si todas las empresas OK, naranja si alguna
+    # se salto, rojo si no se sincronizo ninguna. Reutilizamos las claves que
+    # el notificador entiende (facturadas_ok / con_error) mapeando el estado.
+    metricas["facturadas_ok"] = metricas["empresas_ok"]
+    metricas["con_error"] = len(metricas["empresas_saltadas"])
+
+    try:
+        hechos, texto_pie = resumen_sync_clientes(metricas)
+        enviar_tarjeta_ejecucion(
+            webhook_url=os.getenv("TEAMS_WEBHOOK_URL"),
+            nombre_proceso="RPA Sincronizacion de Clientes",
+            entorno=os.getenv("QBO_ENTORNO", "produccion"),
+            metricas=metricas,
+            hechos_resumen=hechos,
+            url_pdf=None,  # sync no genera PDF
+            texto_pie=texto_pie,
+        )
+    except Exception as e_teams:
+        print(f"[aviso] No se pudo notificar a Teams: {e_teams}")
 
 
 if __name__ == "__main__":

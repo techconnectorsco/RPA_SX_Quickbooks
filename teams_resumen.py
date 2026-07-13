@@ -98,3 +98,40 @@ def resumen_contratos_fijos(m):
 
     texto_pie = _texto_desglose_errores(m, _ERRORES)
     return hechos, texto_pie
+
+
+def resumen_sync_clientes(m):
+    """Devuelve (hechos, texto_pie) para el RPA de sincronizacion de clientes.
+
+    Es mas simple que los de facturacion: no hay montos ni facturas, solo el
+    conteo de clientes sincronizados y el estado por empresa.
+    """
+    hechos = [
+        {
+            "title": "Clientes sincronizados",
+            "value": str(m.get("total_sincronizados", 0)),
+        },
+        {
+            "title": "Empresas procesadas",
+            "value": f"{m.get('empresas_ok', 0)} de {m.get('empresas_total', 0)}",
+        },
+    ]
+
+    # Detalle por empresa (cuantos clientes de cada una)
+    detalle = m.get("detalle_por_empresa") or []
+    for d in detalle:
+        hechos.append(
+            {"title": d.get("nombre", "-"), "value": f"{d.get('clientes', 0)} clientes"}
+        )
+
+    hechos.append({"title": "Duracion", "value": str(m.get("tiempo_ejecucion", "-"))})
+
+    # Pie: si alguna empresa se salto, se detalla el motivo
+    saltadas = m.get("empresas_saltadas") or []
+    texto_pie = None
+    if saltadas:
+        partes = [
+            f"{s.get('nombre', '-')} ({s.get('motivo', 'error')})" for s in saltadas
+        ]
+        texto_pie = "No sincronizadas: " + "; ".join(partes)
+    return hechos, texto_pie
