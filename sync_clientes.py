@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 # ── Configuracion ────────────────────────────────────────────────────────────
 load_dotenv()  # .env de esta carpeta (QBO_CLIENT_ID / QBO_CLIENT_SECRET)
-RUTA_ENV_WEBAPP = r"D:\Users\Usuario\Desktop\SX-Ecosystem\SX-Ecosystem\.env"
+RUTA_ENV_WEBAPP = r"C:\RPA_SX_Quickbooks\.env"
 if os.path.exists(RUTA_ENV_WEBAPP):
     load_dotenv(RUTA_ENV_WEBAPP, override=False)  # de aqui sale DATABASE_URL
 

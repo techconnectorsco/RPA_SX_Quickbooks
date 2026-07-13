@@ -36,7 +36,7 @@ load_dotenv()  # carga el .env de ESTA carpeta (QBO_CLIENT_ID, QBO_CLIENT_SECRET
 
 # Tambien cargamos el .env de la webapp para tomar DATABASE_URL de ahi.
 # Si tu ruta es otra, cambiala aqui:
-RUTA_ENV_WEBAPP = r"D:\Users\Usuario\Desktop\SX-Ecosystem\SX-Ecosystem\.env"
+RUTA_ENV_WEBAPP = r"C:\RPA_SX_Quickbooks\.env"
 if os.path.exists(RUTA_ENV_WEBAPP):
     load_dotenv(RUTA_ENV_WEBAPP, override=False)
 
