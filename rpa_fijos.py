@@ -65,12 +65,33 @@ from teams_resumen import resumen_contratos_fijos
 
 LIMITE_FACTURAS = None  # None = todas.  1 = procesar solo UNA (util al pasar a prod).
 IGNORAR_DIA_EMISION = (
-    True  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
+    False  # True = ignora el filtro del dia (util SOLO para probar en sandbox).
 )
 
 # Si en PRODUCCION falta un impuesto del % que pide una linea:
 #   False (recomendado) -> NO lo crea; marca error. True -> lo crea.
 CREAR_IMPUESTOS_FALTANTES = False
+
+# ── CAMBIO DE MONEDA (switch "moneda invertida"): DESCONTINUADO ──────────────
+# QuickBooks NO maneja clientes multimoneda: cada cliente tiene UNA moneda fija
+# (la de sus cuentas por cobrar) y TODAS sus facturas deben ir en esa moneda.
+# Ademas, esa moneda ya no se puede cambiar una vez que el cliente tiene
+# movimientos. Si intentamos facturar en otra, QBO rechaza con el error 6000:
+#   "Cambie esta divisa de la transaccion para que coincida con la que usa
+#    para sus cuentas por cobrar y por pagar."
+#
+# En la practica, cuando hay que facturarle a un mismo cliente en las dos
+# monedas, en QuickBooks se crea DOS VECES con Ids distintos. Ejemplo real:
+#   Id 17 | USD | AGENCIA ADUANAL SAMESA S.A.
+#   Id 18 | CRC | AGENCIA ADUANAL SAMESA SOCIEDAD ANONIMA
+#
+# Por eso el switch se descontinuo: la moneda de la factura la define el
+# CLIENTE elegido en QuickBooks, no una conversion nuestra. La webapp filtra
+# los clientes por moneda al armar el contrato, y el RPA factura SIEMPRE en la
+# moneda del contrato (que es la del cliente que se eligio).
+# Se deja el codigo de conversion por si alguna vez cambia la regla; para
+# reactivarlo basta poner esto en True.
+CAMBIO_MONEDA_HABILITADO = False
 
 TAX_CODES_CACHE = {}
 
@@ -193,10 +214,17 @@ def leer_emisiones_listas(conn, periodo):
                 c.moneda,
                 c.dia_emision,
                 c.descripcion_factura AS contrato_descripcion,
-                e.realm_id
+                e.realm_id,
+                cq.email             AS cliente_email
             FROM emisiones_cronograma em
             JOIN contratos_cronograma c ON c.id = em.contrato_id
             LEFT JOIN empresas e ON e.nombre = c.compania_facturadora
+            -- Correo del cliente desde la tabla espejo de QuickBooks: QBO no lo
+            -- hereda solo al crear la factura por API, y sin correo el
+            -- Facturador Plus no puede despacharla a Hacienda.
+            LEFT JOIN clientes_quickbooks cq
+                   ON cq.empresa_id = e.id
+                  AND cq.qbo_customer_id = c.qbo_customer_id
             WHERE em.estado = 'Lista'
               AND em.qbo_invoice_id IS NULL
               AND em.mes_facturado = %s
@@ -333,6 +361,17 @@ def _cargar_mapa_impuestos(realm, token):
             nombre_tc = (tc.get("Name") or "").lower()
             if nombre_tc.endswith(" r") or "retenc" in nombre_tc:
                 continue
+
+            # El TaxCode "Exento" (0% de venta) se guarda aparte, bajo la clave 0.
+            # Se exige el nombre EXACTO "exento" a proposito: en cada empresa hay
+            # VARIOS codigos al 0% que NO son lo mismo ante Hacienda
+            # ("Exportacion 0%", "NO SUJETO AL IVA", "Exonerado 0%"). Agarrar el
+            # primero que aparezca seria un error contable silencioso.
+            #   Verificado: SX=23, H&N=22, Laitcorp=23 se llaman todos "Exento".
+            if nombre_tc.strip() == "exento":
+                mapa.setdefault(0, tc["Id"])
+                continue
+
             detalles = (tc.get("SalesTaxRateList") or {}).get("TaxRateDetail", [])
             for det in detalles:
                 rid = (det.get("TaxRateRef") or {}).get("value")
@@ -391,8 +430,24 @@ def taxcode_para(porcentaje, realm, token):
     if porcentaje is None:
         return "NON"
     pct = round(float(porcentaje), 2)
+
+    # ── 0% / exento ──
+    # En produccion QuickBooks NO acepta la marca generica "NON": exige un
+    # TaxCode real en cada linea, incluso en las exentas. (Error 6000:
+    # "Asegurese de que todas las transacciones tengan una tasa impositiva a
+    #  las ventas antes de guardarlas".)
+    # En sandbox (empresa gringa, sin impuestos de CR) "NON" si funciona.
     if pct == 0:
-        return "NON"
+        if ENTORNO == "sandbox":
+            return "NON"
+        mapa = _cargar_mapa_impuestos(realm, token)
+        code = mapa.get(0)
+        if code:
+            return code
+        raise RuntimeError(
+            "IVA no valido: la empresa no tiene un impuesto de venta 'Exento' "
+            "configurado en QuickBooks."
+        )
 
     mapa = _cargar_mapa_impuestos(realm, token)
     if pct in mapa:
@@ -442,13 +497,15 @@ def moneda_factura(moneda_contrato, invertir):
     return "CRC" if base == "USD" else "USD"
 
 
-def construir_factura(em, lineas, realm, token, tc_venta):
+def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
     customer = CFG["cliente_fijo"] or em["qbo_customer_id"]
     item_id = item_para(realm)
     if not item_id or item_id == "TODO":
         raise RuntimeError("Falta configurar el item de contratos para esta empresa.")
 
-    invertir = bool(em.get("moneda_invertida"))
+    # El switch quedo descontinuado (ver CAMBIO_MONEDA_HABILITADO arriba): la
+    # moneda la define el cliente elegido en QuickBooks, no una conversion.
+    invertir = bool(em.get("moneda_invertida")) and CAMBIO_MONEDA_HABILITADO
     moneda_contrato = em.get("moneda") or "Dólares"
     tipo = em["estado_emision"]
     desc = (
@@ -463,7 +520,10 @@ def construir_factura(em, lineas, realm, token, tc_venta):
 
     def ref_impuesto(porcentaje, exonerado):
         if exonerado:
-            return "NON"
+            # 'exonerado' en la webapp significa EXENTO (la linea no lleva IVA).
+            # taxcode_para(0) devuelve el TaxCode "Exento" real de la empresa en
+            # produccion, y "NON" en sandbox.
+            return taxcode_para(0, realm, token)
         code = taxcode_para(porcentaje, realm, token)
         if code not in ("NON", "TAX"):
             codigos_gravados.add(code)
@@ -471,9 +531,18 @@ def construir_factura(em, lineas, realm, token, tc_venta):
 
     if tipo == "facturar_completo":
         for ln in lineas:
-            amount = convertir_monto(
-                ln["total_linea"], moneda_contrato, invertir, tc_venta
+            qty = float(ln["cantidad"])
+            # QuickBooks VALIDA que Amount == UnitPrice x Qty y rechaza la
+            # factura si no cuadra al centimo (error 6070: "El monto no es
+            # equivalente al precio unitario por la cantidad").
+            # Por eso el Amount NO se toma de total_linea ni se calcula aparte:
+            # se DERIVA del precio unitario ya redondeado. Asi nunca se
+            # descuadra, ni por redondeos ni por datos con centimos de mas
+            # guardados en la webapp.
+            unit_price = convertir_monto(
+                ln["monto_por_unidad"], moneda_contrato, invertir, tc_venta
             )
+            amount = round(qty * unit_price, 2)
             lineas_qbo.append(
                 {
                     "DetailType": "SalesItemLineDetail",
@@ -481,10 +550,8 @@ def construir_factura(em, lineas, realm, token, tc_venta):
                     "Description": ln["descripcion"],
                     "SalesItemLineDetail": {
                         "ItemRef": {"value": item_id},
-                        "Qty": float(ln["cantidad"]),
-                        "UnitPrice": convertir_monto(
-                            ln["monto_por_unidad"], moneda_contrato, invertir, tc_venta
-                        ),
+                        "Qty": qty,
+                        "UnitPrice": unit_price,
                         "TaxCodeRef": {
                             "value": ref_impuesto(ln["porcentaje_iva"], ln["exonerado"])
                         },
@@ -515,7 +582,9 @@ def construir_factura(em, lineas, realm, token, tc_venta):
         pct_iva = primera_gravada["porcentaje_iva"] if primera_gravada else None
         exon = primera_gravada is None
 
-        amount = convertir_monto(monto_base, moneda_contrato, invertir, tc_venta)
+        # Qty = 1, asi que Amount y UnitPrice son el mismo numero: cuadra solo.
+        unit_price = convertir_monto(monto_base, moneda_contrato, invertir, tc_venta)
+        amount = round(1 * unit_price, 2)
         lineas_qbo.append(
             {
                 "DetailType": "SalesItemLineDetail",
@@ -524,13 +593,26 @@ def construir_factura(em, lineas, realm, token, tc_venta):
                 "SalesItemLineDetail": {
                     "ItemRef": {"value": item_id},
                     "Qty": 1,
-                    "UnitPrice": amount,
+                    "UnitPrice": unit_price,
                     "TaxCodeRef": {"value": ref_impuesto(pct_iva, exon)},
                 },
             }
         )
 
     factura = {"Line": lineas_qbo, "CustomerRef": {"value": str(customer)}}
+
+    # Los montos que mandamos son SIN IVA: QuickBooks debe sumarlo encima usando
+    # el TaxCodeRef de cada linea. Sin esta directiva, algunas facturas salian
+    # como EXENTAS aunque sus lineas llevaran IVA. Solo aplica a produccion: el
+    # sandbox es una empresa gringa y no maneja este calculo global.
+    if ENTORNO == "produccion":
+        factura["GlobalTaxCalculation"] = "TaxExcluded"
+
+    # Correo del cliente: QuickBooks NO lo hereda del perfil al crear la factura
+    # por API, y sin correo el Facturador Plus no puede despacharla a Hacienda.
+    # Sale de la tabla espejo clientes_quickbooks (la llena sync_clientes.py).
+    if correo_cliente:
+        factura["BillEmail"] = {"Address": correo_cliente}
 
     # Nota visible en la factura (para porcentaje / parcial)
     if nota_factura:
@@ -733,7 +815,7 @@ def main():
             try:
                 # Tipo de cambio: solo si esta emision invierte moneda
                 tc_venta = None
-                if em.get("moneda_invertida"):
+                if em.get("moneda_invertida") and CAMBIO_MONEDA_HABILITADO:
                     if tc_dia is None:
                         tc_dia = obtener_tipo_cambio()
                         print(
@@ -751,7 +833,14 @@ def main():
                 if not lineas:
                     raise RuntimeError("Contrato sin lineas para facturar")
 
-                factura = construir_factura(em, lineas, realm, tokens[realm], tc_venta)
+                factura = construir_factura(
+                    em,
+                    lineas,
+                    realm,
+                    tokens[realm],
+                    tc_venta,
+                    correo_cliente=em.get("cliente_email"),
+                )
                 inv = enviar_factura(realm, tokens[realm], factura)
 
                 marcar_emitida(conn, eid, inv, tc_venta)
