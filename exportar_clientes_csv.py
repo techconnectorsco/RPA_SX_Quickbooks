@@ -2,13 +2,8 @@
 exportar_clientes_csv.py
 ------------------------
 Script de extracción de clientes de QuickBooks para análisis y migración.
-Lee todos los clientes de las 3 empresas y genera un archivo CSV con la
-nueva estructura propuesta para la base de datos.
-
-SEGURIDAD:
-  - Solo lectura (GET) en QuickBooks.
-  - No requiere conexión a la base de datos local (evita bloqueos o alteraciones).
-  - Manejo seguro de campos anidados (JSON).
+Lee todos los clientes de las 3 empresas, los ORDENA alfabéticamente,
+y genera un archivo CSV con la nueva estructura.
 """
 
 import os
@@ -124,10 +119,9 @@ def main():
         return
 
     print("=" * 70)
-    print("EXTRACCIÓN DE CLIENTES QBO A CSV")
+    print("EXTRACCIÓN DE CLIENTES QBO A CSV (ORDENADO)")
     print("=" * 70)
 
-    # Definir los encabezados del CSV exactamente como los solicitaste
     encabezados = [
         "uuid_empresa",
         "nombre_empresa",
@@ -145,7 +139,6 @@ def main():
 
     total_registros = 0
 
-    # Abrir el archivo CSV para escritura
     with open(CSV_OUTPUT_FILE, mode="w", newline="", encoding="utf-8") as archivo_csv:
         escritor = csv.DictWriter(archivo_csv, fieldnames=encabezados)
         escritor.writeheader()
@@ -161,10 +154,17 @@ def main():
 
             print("  Descargando clientes...")
             clientes_qbo = descargar_clientes_completos(emp["realm"], token)
-            print(f"  Se encontraron {len(clientes_qbo)} clientes. Exportando a CSV...")
+
+            # ── LA MAGIA DEL ORDENAMIENTO ESTÁ AQUÍ ──
+            # Ordenamos la lista de diccionarios por 'DisplayName', convirtiéndolo a mayúsculas
+            # para que 'a' y 'A' se traten igual. Si no tiene DisplayName, usa un string vacío.
+            clientes_qbo.sort(key=lambda x: (x.get("DisplayName") or "").upper())
+
+            print(
+                f"  Se encontraron {len(clientes_qbo)} clientes. Exportando ordenados a CSV..."
+            )
 
             for c in clientes_qbo:
-                # Limpieza de notas: quitar saltos de línea para que no rompan visualmente el CSV
                 notas_crudas = c.get("Notes", "")
                 notas_limpias = (
                     notas_crudas.replace("\n", " ").replace("\r", " ").strip()
@@ -172,7 +172,6 @@ def main():
                     else ""
                 )
 
-                # Armar el diccionario para la fila del CSV
                 fila = {
                     "uuid_empresa": emp["uuid"],
                     "nombre_empresa": emp["nombre"],
