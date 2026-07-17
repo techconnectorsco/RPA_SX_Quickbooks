@@ -369,7 +369,7 @@ def _cargar_mapa_impuestos(realm, token):
             # primero que aparezca seria un error contable silencioso.
             #   Verificado: SX=23, H&N=22, Laitcorp=23 se llaman todos "Exento".
             if nombre_tc.strip() == "exento":
-                mapa.setdefault(0, tc["Id"])
+                mapa.setdefault(0, (tc["Id"], None))
                 continue
 
             detalles = (tc.get("SalesTaxRateList") or {}).get("TaxRateDetail", [])
@@ -382,7 +382,7 @@ def _cargar_mapa_impuestos(realm, token):
                     continue
                 if not es_rate_de_venta(nombre_rate):
                     continue
-                mapa.setdefault(pct, tc["Id"])
+                mapa.setdefault(pct, (tc["Id"], rid))
                 break
 
     TAX_CODES_CACHE[realm] = mapa
@@ -428,7 +428,7 @@ def taxcode_para(porcentaje, realm, token):
     filtra retenciones/inactivos). PRODUCCION: rechaza 'IVA no valido' si no hay
     impuesto de venta para ese %. SANDBOX: lo crea para no frenar pruebas."""
     if porcentaje is None:
-        return "NON"
+        return ("NON", None)
     pct = round(float(porcentaje), 2)
 
     # ── 0% / exento ──
@@ -436,22 +436,22 @@ def taxcode_para(porcentaje, realm, token):
     # TaxCode real en cada linea, incluso en las exentas. (Error 6000:
     # "Asegurese de que todas las transacciones tengan una tasa impositiva a
     #  las ventas antes de guardarlas".)
-    # En sandbox (empresa gringa, sin impuestos de CR) "NON" si funciona.
     if pct == 0:
         if ENTORNO == "sandbox":
-            return "NON"
+            return ("NON", None)
         mapa = _cargar_mapa_impuestos(realm, token)
-        code = mapa.get(0)
-        if code:
-            return code
+        code_info = mapa.get(0)
+        if code_info:
+            return code_info
         raise RuntimeError(
             "IVA no valido: la empresa no tiene un impuesto de venta 'Exento' "
             "configurado en QuickBooks."
         )
 
     mapa = _cargar_mapa_impuestos(realm, token)
-    if pct in mapa:
-        return mapa[pct]
+    code_info = mapa.get(pct)
+    if code_info:
+        return code_info
 
     if ENTORNO == "produccion":
         raise RuntimeError(
@@ -460,7 +460,8 @@ def taxcode_para(porcentaje, realm, token):
         )
 
     print(f"    impuesto {pct}% no existe en sandbox; creandolo...")
-    return _crear_taxcode(pct, realm, token)
+    tcid = _crear_taxcode(pct, realm, token)
+    return (tcid, None)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -503,8 +504,6 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
     if not item_id or item_id == "TODO":
         raise RuntimeError("Falta configurar el item de contratos para esta empresa.")
 
-    # El switch quedo descontinuado (ver CAMBIO_MONEDA_HABILITADO arriba): la
-    # moneda la define el cliente elegido en QuickBooks, no una conversion.
     invertir = bool(em.get("moneda_invertida")) and CAMBIO_MONEDA_HABILITADO
     moneda_contrato = em.get("moneda") or "Dólares"
     tipo = em["estado_emision"]
@@ -515,30 +514,39 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
     )
 
     lineas_qbo = []
-    codigos_gravados = set()
     nota_factura = None
+    codigos_gravados = set()
+    
+    # Variables para calculo manual de IVA en produccion
+    tax_lines = {}
+    total_tax = 0.0
 
-    def ref_impuesto(porcentaje, exonerado):
-        if exonerado:
-            # 'exonerado' en la webapp significa EXENTO (la linea no lleva IVA).
-            # taxcode_para(0) devuelve el TaxCode "Exento" real de la empresa en
-            # produccion, y "NON" en sandbox.
-            return taxcode_para(0, realm, token)
-        code = taxcode_para(porcentaje, realm, token)
+    def ref_impuesto(porcentaje, exonerado, amount):
+        nonlocal total_tax
+        if exonerado or porcentaje is None or float(porcentaje) == 0:
+            code, _ = taxcode_para(0, realm, token)
+            return "NON" if ENTORNO == "sandbox" else code
+            
+        code, rate_id = taxcode_para(porcentaje, realm, token)
         if code not in ("NON", "TAX"):
             codigos_gravados.add(code)
+            
+        # Acumulamos el tax para el TxnTaxDetail manual
+        if ENTORNO == "produccion" and rate_id:
+            pct = float(porcentaje)
+            tax_amt = round(amount * (pct / 100.0), 2)
+            total_tax += tax_amt
+            
+            if rate_id not in tax_lines:
+                tax_lines[rate_id] = {"amount": 0.0, "net": 0.0, "pct": pct}
+            tax_lines[rate_id]["amount"] += tax_amt
+            tax_lines[rate_id]["net"] += amount
+
         return "TAX" if ENTORNO == "sandbox" else str(code)
 
     if tipo == "facturar_completo":
         for ln in lineas:
             qty = float(ln["cantidad"])
-            # QuickBooks VALIDA que Amount == UnitPrice x Qty y rechaza la
-            # factura si no cuadra al centimo (error 6070: "El monto no es
-            # equivalente al precio unitario por la cantidad").
-            # Por eso el Amount NO se toma de total_linea ni se calcula aparte:
-            # se DERIVA del precio unitario ya redondeado. Asi nunca se
-            # descuadra, ni por redondeos ni por datos con centimos de mas
-            # guardados en la webapp.
             unit_price = convertir_monto(
                 ln["monto_por_unidad"], moneda_contrato, invertir, tc_venta
             )
@@ -553,7 +561,7 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
                         "Qty": qty,
                         "UnitPrice": unit_price,
                         "TaxCodeRef": {
-                            "value": ref_impuesto(ln["porcentaje_iva"], ln["exonerado"])
+                            "value": ref_impuesto(ln["porcentaje_iva"], ln["exonerado"], amount)
                         },
                     },
                 }
@@ -594,12 +602,15 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
                     "ItemRef": {"value": item_id},
                     "Qty": 1,
                     "UnitPrice": unit_price,
-                    "TaxCodeRef": {"value": ref_impuesto(pct_iva, exon)},
+                    "TaxCodeRef": {"value": ref_impuesto(pct_iva, exon, amount)},
                 },
             }
         )
 
     factura = {"Line": lineas_qbo, "CustomerRef": {"value": str(customer)}}
+    import json
+    print("PAYLOAD FACTURA DEBUG:")
+    print(json.dumps(factura, indent=2))
 
     # Los montos que mandamos son SIN IVA: QuickBooks debe sumarlo encima usando
     # el TaxCodeRef de cada linea. Sin esta directiva, algunas facturas salian
@@ -607,6 +618,27 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
     # sandbox es una empresa gringa y no maneja este calculo global.
     if ENTORNO == "produccion":
         factura["GlobalTaxCalculation"] = "TaxExcluded"
+        
+        # QuickBooks API NO autocalcula el IVA en empresas Global (fuera de EEUU).
+        # Es obligatorio mandar el TxnTaxDetail con el TotalTax y el detalle por tasa,
+        # de lo contrario asume que el impuesto es 0 y descuadra con Hacienda/Mondragon.
+        if total_tax > 0:
+            tax_details = []
+            for rate_id, data in tax_lines.items():
+                tax_details.append({
+                    "Amount": round(data["amount"], 2),
+                    "DetailType": "TaxLineDetail",
+                    "TaxLineDetail": {
+                        "TaxRateRef": {"value": str(rate_id)},
+                        "PercentBased": True,
+                        "TaxPercent": data["pct"],
+                        "NetAmountTaxable": round(data["net"], 2)
+                    }
+                })
+            factura["TxnTaxDetail"] = {
+                "TotalTax": round(total_tax, 2),
+                "TaxLine": tax_details
+            }
 
     # Correo del cliente: QuickBooks NO lo hereda del perfil al crear la factura
     # por API, y sin correo el Facturador Plus no puede despacharla a Hacienda.
