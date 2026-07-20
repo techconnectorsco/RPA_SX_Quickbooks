@@ -389,6 +389,15 @@ def _cargar_mapa_impuestos(realm, token):
                 continue
 
             detalles = (tc.get("SalesTaxRateList") or {}).get("TaxRateDetail", [])
+            
+            # Ver si es Exonerado (tiene "exonerado" en el nombre o tiene alguna tasa negativa)
+            es_exonerado = "exonerado" in nombre_tc
+            for det in detalles:
+                rid = (det.get("TaxRateRef") or {}).get("value")
+                if rid in rate_info and rate_info[rid][0] < 0:
+                    es_exonerado = True
+                    break
+
             for det in detalles:
                 rid = (det.get("TaxRateRef") or {}).get("value")
                 if rid not in rate_info:
@@ -398,7 +407,9 @@ def _cargar_mapa_impuestos(realm, token):
                     continue
                 if not es_rate_de_venta(nombre_rate):
                     continue
-                mapa.setdefault(pct, (tc["Id"], rid))
+                
+                clave = f"{pct}_exo" if es_exonerado else pct
+                mapa.setdefault(clave, (tc["Id"], rid))
                 break
 
     TAX_CODES_CACHE[realm] = mapa
@@ -438,7 +449,7 @@ def _crear_taxcode(porcentaje, realm, token):
     )
 
 
-def taxcode_para(porcentaje, realm, token):
+def taxcode_para(porcentaje, realm, token, es_exonerado=False):
     """Devuelve el TaxCode Id de VENTA para un porcentaje. 'NON' si exento/0%.
     Busca dinamicamente el codigo de VENTA (via _cargar_mapa_impuestos, que
     filtra retenciones/inactivos). PRODUCCION: rechaza 'IVA no valido' si no hay
@@ -449,9 +460,7 @@ def taxcode_para(porcentaje, realm, token):
 
     # ── 0% / exento ──
     # En produccion QuickBooks NO acepta la marca generica "NON": exige un
-    # TaxCode real en cada linea, incluso en las exentas. (Error 6000:
-    # "Asegurese de que todas las transacciones tengan una tasa impositiva a
-    #  las ventas antes de guardarlas".)
+    # TaxCode real en cada linea, incluso en las exentas.
     if pct == 0:
         if ENTORNO == "sandbox":
             return ("NON", None)
@@ -465,9 +474,19 @@ def taxcode_para(porcentaje, realm, token):
         )
 
     mapa = _cargar_mapa_impuestos(realm, token)
-    code_info = mapa.get(pct)
-    if code_info:
-        return code_info
+    
+    if es_exonerado:
+        code_info = mapa.get(f"{pct}_exo")
+        if code_info:
+            return code_info
+        # Si no hay un exonerado específico, caemos en Exento (0%)
+        code_info = mapa.get(0)
+        if code_info:
+            return code_info
+    else:
+        code_info = mapa.get(pct)
+        if code_info:
+            return code_info
 
     if ENTORNO == "produccion":
         raise RuntimeError(
@@ -551,16 +570,17 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
 
     def ref_impuesto(porcentaje, exonerado, amount):
         nonlocal total_tax
-        if exonerado or porcentaje is None or float(porcentaje) == 0:
-            code, _ = taxcode_para(0, realm, token)
+        if porcentaje is None or float(porcentaje) == 0:
+            code, _ = taxcode_para(0, realm, token, False)
             return "NON" if ENTORNO == "sandbox" else code
             
-        code, rate_id = taxcode_para(porcentaje, realm, token)
+        code, rate_id = taxcode_para(porcentaje, realm, token, exonerado)
         if code not in ("NON", "TAX"):
             codigos_gravados.add(code)
             
-        # Acumulamos el tax para el TxnTaxDetail manual
-        if ENTORNO == "produccion" and rate_id:
+        # Acumulamos el tax para el TxnTaxDetail manual solo si NO está exonerado.
+        # Si es exonerado, el neto matemático es 0 y no debe sumar al TotalTax.
+        if ENTORNO == "produccion" and rate_id and not exonerado:
             pct = float(porcentaje)
             tax_amt = round(amount * (pct / 100.0), 2)
             total_tax += tax_amt
