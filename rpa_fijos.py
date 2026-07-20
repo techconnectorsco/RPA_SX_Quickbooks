@@ -123,22 +123,19 @@ ENTORNOS = {
         "client_secret": os.getenv("QBO_CLIENT_SECRET"),
         "realm_fijo": None,
         "cliente_fijo": None,
-        # Item con el que se factura cada empresa en produccion (confirmado
-        # contra el catalogo real de QuickBooks de cada una):
-        #   - Soportexperto y Laitcorp: "CONTRATOS HORAS ADICIONALES".
-        #   - Hardware y Network NO tiene ese item; se usa "Venta de Servicios
-        #     y Proyectos" (Id 157). Casi nunca se factura contratos por esta
-        #     empresa, pero queda cubierto.
-        # NOTA (Fase 2): hoy el item es FIJO por empresa; luego se hara dinamico
-        # segun el tipo de servicio/clase de cada linea.
-        "item_operaciones": {
-            "9130355360397996": "4",  # Soportexperto  -> CONTRATOS HORAS ADICIONALES
+        # El item por defecto a usar si no se encuentra mapeo
+        "item_operaciones_default": {
+            "9130355360397996": "4",    # Soportexperto  -> CONTRATOS HORAS ADICIONALES
             "9130355360390096": "157",  # Hardware y Network -> Venta de Servicios y Proyectos
-            "9130355360394696": "5",  # Laitcorp       -> CONTRATOS HORAS ADICIONALES
+            "9130355360394696": "5",    # Laitcorp       -> CONTRATOS HORAS ADICIONALES
         },
         "usar_moneda_real": True,
     },
 }
+
+# ── Fase 2: Mapeo de Servicios Webapp a Items QBO ─────────────────────────────
+# Se carga desde la base de datos (tabla servicios_quickbooks) al iniciar
+MAPA_SERVICIOS_BD = {}
 
 if ENTORNO not in ENTORNOS:
     sys.exit(f"QBO_ENTORNO invalido: '{ENTORNO}'. Use 'sandbox' o 'produccion'.")
@@ -190,6 +187,22 @@ def get_access_token(realm):
 #  BASE DE DATOS
 # ════════════════════════════════════════════════════════════════════════════
 
+def cargar_mapa_servicios(conn):
+    """Carga en memoria el catálogo de servicios (por empresa) para mapear en Fase 2."""
+    global MAPA_SERVICIOS_BD
+    MAPA_SERVICIOS_BD.clear()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT e.realm_id, s.nombre, s.qbo_item_id
+            FROM servicios s
+            JOIN empresas e ON e.id = s.empresa_id
+            WHERE e.realm_id IS NOT NULL AND s.qbo_item_id IS NOT NULL
+        """)
+        for realm_id, servicio_nombre, qbo_id in cur.fetchall():
+            if realm_id not in MAPA_SERVICIOS_BD:
+                MAPA_SERVICIOS_BD[realm_id] = {}
+            MAPA_SERVICIOS_BD[realm_id][servicio_nombre] = qbo_id
+
 
 def leer_emisiones_listas(conn, periodo):
     """
@@ -239,10 +252,12 @@ def leer_lineas_contrato(conn, contrato_id):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT descripcion, cantidad, monto_por_unidad, total_linea,
-                   porcentaje_iva, exonerado
-            FROM lineas_contrato
-            WHERE contrato_id = %s
+            SELECT lc.descripcion, lc.cantidad, lc.monto_por_unidad, lc.total_linea,
+                   lc.porcentaje_iva, lc.exonerado,
+                   s.nombre AS servicio
+            FROM lineas_contrato lc
+            LEFT JOIN servicios s ON s.id = lc.servicio_id
+            WHERE lc.contrato_id = %s
             ORDER BY orden
         """,
             (contrato_id,),
@@ -469,9 +484,22 @@ def taxcode_para(porcentaje, realm, token):
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def item_para(realm):
-    it = CFG["item_operaciones"]
-    return it if isinstance(it, str) else it.get(realm)
+def item_para(realm, nombre_servicio=None):
+    # Fase 2 implementada: buscamos el ID exacto segun el servicio webapp en la BD
+    mapeo_empresa = MAPA_SERVICIOS_BD.get(realm, {})
+    
+    print(f"\n[DEBUG ITEM_PARA] realm: {realm}, nombre_servicio webapp: '{nombre_servicio}'")
+    print(f"[DEBUG ITEM_PARA] mapeo_empresa para {realm}: {mapeo_empresa}")
+    
+    if nombre_servicio and nombre_servicio in mapeo_empresa:
+        print(f"[DEBUG ITEM_PARA] -> Encontrado! ID QBO: {mapeo_empresa[nombre_servicio]}\n")
+        return mapeo_empresa[nombre_servicio]
+        
+    # Si el servicio no esta en el mapa, usamos el default de la empresa
+    defaults = CFG.get("item_operaciones_default", {})
+    id_default = defaults.get(realm)
+    print(f"[DEBUG ITEM_PARA] -> NO encontrado. Usando default: {id_default}\n")
+    return id_default
 
 
 def convertir_monto(monto, moneda_contrato, invertir, tc_venta):
@@ -500,9 +528,8 @@ def moneda_factura(moneda_contrato, invertir):
 
 def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
     customer = CFG["cliente_fijo"] or em["qbo_customer_id"]
-    item_id = item_para(realm)
-    if not item_id or item_id == "TODO":
-        raise RuntimeError("Falta configurar el item de contratos para esta empresa.")
+    if not customer:
+        raise RuntimeError("Falta configurar el cliente de contratos para esta empresa.")
 
     invertir = bool(em.get("moneda_invertida")) and CAMBIO_MONEDA_HABILITADO
     moneda_contrato = em.get("moneda") or "Dólares"
@@ -557,7 +584,7 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
                     "Amount": amount,
                     "Description": ln["descripcion"],
                     "SalesItemLineDetail": {
-                        "ItemRef": {"value": item_id},
+                        "ItemRef": {"value": item_para(realm, ln.get("servicio"))},
                         "Qty": qty,
                         "UnitPrice": unit_price,
                         "TaxCodeRef": {
@@ -590,6 +617,9 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
         pct_iva = primera_gravada["porcentaje_iva"] if primera_gravada else None
         exon = primera_gravada is None
 
+        # Tomamos el primer servicio de la lista para la factura colapsada
+        primer_servicio = lineas[0].get("servicio") if lineas else None
+        
         # Qty = 1, asi que Amount y UnitPrice son el mismo numero: cuadra solo.
         unit_price = convertir_monto(monto_base, moneda_contrato, invertir, tc_venta)
         amount = round(1 * unit_price, 2)
@@ -599,7 +629,7 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
                 "Amount": amount,
                 "Description": desc,
                 "SalesItemLineDetail": {
-                    "ItemRef": {"value": item_id},
+                    "ItemRef": {"value": item_para(realm, primer_servicio)},
                     "Qty": 1,
                     "UnitPrice": unit_price,
                     "TaxCodeRef": {"value": ref_impuesto(pct_iva, exon, amount)},
@@ -771,6 +801,9 @@ def main():
 
     try:
         emisiones = leer_emisiones_listas(conn, periodo)
+        
+        cargar_mapa_servicios(conn)
+
         print(f"\nEmisiones 'Lista' de {periodo}: {len(emisiones)}")
 
         # Filtro por dia de emision
