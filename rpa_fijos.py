@@ -220,6 +220,7 @@ def leer_emisiones_listas(conn, periodo):
                 em.monto_real,
                 em.descripcion_factura AS emision_descripcion,
                 em.moneda_invertida,
+                em.observaciones_internas,
                 c.id                 AS contrato_id,
                 c.qbo_customer_id,
                 c.nombre_cliente,
@@ -679,6 +680,10 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
     # Nota visible en la factura (para porcentaje / parcial)
     if nota_factura:
         factura["CustomerMemo"] = {"value": nota_factura}
+
+    # Nota privada interna
+    if em.get("observaciones_internas"):
+        factura["PrivateNote"] = em["observaciones_internas"]
 
     # Sandbox: impuesto global (limitacion del sandbox gringo)
     if ENTORNO == "sandbox" and codigos_gravados:
