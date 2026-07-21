@@ -128,14 +128,10 @@ ENTORNOS = {
         "client_secret": os.getenv("QBO_CLIENT_SECRET"),
         "realm_fijo": None,  # usa el realm real de cada empresa
         "cliente_fijo": None,  # usa el qbo_customer_id de la operacion
-        # Item con el que se factura cada empresa en produccion (confirmado
-        # contra el catalogo real de QuickBooks de cada una):
-        #   - Soportexperto y Laitcorp: "CONTRATOS HORAS ADICIONALES".
-        #   - Hardware y Network NO tiene ese item; se usa "Venta de Servicios
-        #     y Proyectos" (Id 157), el item de servicio generico de esa empresa.
-        # NOTA (Fase 2): hoy el item es FIJO por empresa. Mas adelante se hara
-        # dinamico segun el tipo de servicio/clase de cada linea.
-        "item_operaciones": {
+        # Fase 1: item FIJO por empresa (fallback cuando no hay mapeo dinamico).
+        # Fase 2: se busca primero en servicios_quickbooks (cargado al iniciar);
+        # si no hay mapeo para ese servicio, se usa este default.
+        "item_operaciones_default": {
             "9130355360397996": "4",  # Soportexperto  -> CONTRATOS HORAS ADICIONALES
             "9130355360390096": "157",  # Hardware y Network -> Venta de Servicios y Proyectos
             "9130355360394696": "5",  # Laitcorp       -> CONTRATOS HORAS ADICIONALES
@@ -152,6 +148,10 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Candado: realms de produccion (para validar que sandbox nunca los toque)
 REALMS_PRODUCCION = {"9130355360397996", "9130355360394696", "9130355360390096"}
+
+# ── Fase 2: Mapeo de Servicios Webapp a Items QBO ────────────────────────────
+# Se carga desde la base de datos (tabla servicios_quickbooks) al iniciar
+MAPA_SERVICIOS_BD = {}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -227,15 +227,34 @@ def leer_lineas(conn, operacion_id):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT descripcion, horas_trabajadas, monto_por_hora, total_linea,
-                   porcentaje_iva, exonerado
-            FROM lineas_operacion
-            WHERE operacion_id = %s
-            ORDER BY orden
+            SELECT lo.descripcion, lo.horas_trabajadas, lo.monto_por_hora,
+                   lo.total_linea, lo.porcentaje_iva, lo.exonerado,
+                   s.nombre AS servicio
+            FROM lineas_operacion lo
+            LEFT JOIN servicios s ON s.id = lo.servicio_id
+            WHERE lo.operacion_id = %s
+            ORDER BY lo.orden
         """,
             (operacion_id,),
         )
         return cur.fetchall()
+
+
+def cargar_mapa_servicios(conn):
+    """Carga en memoria el catálogo de servicios (por empresa) para mapear en Fase 2."""
+    global MAPA_SERVICIOS_BD
+    MAPA_SERVICIOS_BD.clear()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT e.realm_id, s.nombre, s.qbo_item_id
+            FROM servicios s
+            JOIN empresas e ON e.id = s.empresa_id
+            WHERE e.realm_id IS NOT NULL AND s.qbo_item_id IS NOT NULL
+        """)
+        for realm_id, servicio_nombre, qbo_id in cur.fetchall():
+            if realm_id not in MAPA_SERVICIOS_BD:
+                MAPA_SERVICIOS_BD[realm_id] = {}
+            MAPA_SERVICIOS_BD[realm_id][servicio_nombre] = qbo_id
 
 
 def marcar_facturada(
@@ -497,16 +516,24 @@ def moneda_factura(moneda_operacion, invertir):
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def item_para(realm):
-    it = CFG["item_operaciones"]
-    return it if isinstance(it, str) else it.get(realm)
+def item_para(realm, nombre_servicio=None):
+    mapeo_empresa = MAPA_SERVICIOS_BD.get(realm, {})
+    
+    print(f"\n[DEBUG ITEM_PARA OPERACIONES] realm: {realm}, nombre_servicio webapp: '{nombre_servicio}'")
+    print(f"[DEBUG ITEM_PARA OPERACIONES] mapeo_empresa para {realm}: {mapeo_empresa}")
+    
+    if nombre_servicio and nombre_servicio in mapeo_empresa:
+        print(f"[DEBUG ITEM_PARA OPERACIONES] -> Encontrado! ID QBO: {mapeo_empresa[nombre_servicio]}\n")
+        return mapeo_empresa[nombre_servicio]
+
+    defaults = CFG.get("item_operaciones_default", {})
+    id_default = defaults.get(realm)
+    print(f"[DEBUG ITEM_PARA OPERACIONES] -> NO encontrado. Usando default: {id_default}\n")
+    return id_default
 
 
 def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
     customer = CFG["cliente_fijo"] or op["qbo_customer_id"]
-    item_id = item_para(realm)
-    if not item_id or item_id == "TODO":
-        raise RuntimeError("Falta configurar el item de operaciones para esta empresa.")
 
     moneda_op = op.get("moneda") or "Dólares"
     # El switch quedo descontinuado (ver CAMBIO_MONEDA_HABILITADO arriba): la
@@ -522,7 +549,7 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
     lineas_qbo = []
     codigos_gravados = set()  # taxcode ids usados (para el global del sandbox)
 
-    def agregar(amount_bd, qty, unit, desc, porcentaje, exonerado):
+    def agregar(amount_bd, qty, unit, desc, porcentaje, exonerado, servicio=None):
         # OJO: `amount_bd` (el total guardado en la base) se recibe pero NO se
         # usa para la factura: el Amount se DERIVA de qty x unit (ver abajo).
         if exonerado:
@@ -560,7 +587,7 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
                 "Amount": amount_final,
                 "Description": desc,
                 "SalesItemLineDetail": {
-                    "ItemRef": {"value": item_id},
+                    "ItemRef": {"value": item_para(realm, servicio)},
                     "Qty": qty_f,
                     "UnitPrice": unit_final,
                     "TaxCodeRef": {"value": line_ref},
@@ -586,6 +613,7 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
                 ln["descripcion"],
                 ln["porcentaje_iva"],
                 ln["exonerado"],
+                servicio=ln.get("servicio"),
             )
 
     factura = {"Line": lineas_qbo, "CustomerRef": {"value": str(customer)}}
@@ -769,6 +797,7 @@ def main():
     tc_dia = None  # se consulta solo si hace falta (alguna operacion invertida)
     try:
         conn = psycopg2.connect(DATABASE_URL)
+        cargar_mapa_servicios(conn)
         operaciones = leer_operaciones_aprobadas(conn)
 
         if LIMITE_FACTURAS is not None:
