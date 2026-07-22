@@ -5,21 +5,44 @@ from dotenv import load_dotenv
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-conn = psycopg2.connect(DATABASE_URL)
-cur = conn.cursor()
+try:
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
 
-print("--- CONTENIDO DE LA TABLA CLASES EN BD LOCAL ---")
-cur.execute("""
-    SELECT c.id, c.nombre, c.qbo_class_id, c.servicio_id, s.nombre as servicio_nombre
-    FROM clases c
-    LEFT JOIN servicios s ON c.servicio_id = s.id
-    LIMIT 30;
-""")
+    # 1. Ver qué columnas tiene la tabla 'clases'
+    cur.execute("""
+        SELECT column_name, data_type 
+        FROM information_schema.columns 
+        WHERE table_name = 'clases';
+    """)
+    columnas = cur.fetchall()
 
-for row in cur.fetchall():
-    print(
-        f"ID BD: {row[0]} | Clase: '{row[1]}' | QBO Class ID: '{row[2]}' | Servicio Vinculado: '{row[4]}'"
-    )
+    print("==================================================")
+    print(" ESTRUCTURA DE LA TABLA 'clases'")
+    print("==================================================")
+    if columnas:
+        for col, tipo in columnas:
+            print(f" - {col:<20} ({tipo})")
+    else:
+        print(" [!] No se encontró la tabla 'clases'. Revisa el nombre exacto.")
 
-cur.close()
-conn.close()
+    # 2. Ver 5 registros de muestra
+    print("\n==================================================")
+    print(" PRIMEROS 5 REGISTROS")
+    print("==================================================")
+    cur.execute("SELECT * FROM clases LIMIT 5;")
+    filas = cur.fetchall()
+
+    if filas and columnas:
+        nombres_cols = [c[0] for c in columnas]
+        for f in filas:
+            reg = dict(zip(nombres_cols, f))
+            print(reg)
+    else:
+        print(" (Tabla vacía o no existe)")
+
+    cur.close()
+    conn.close()
+
+except Exception as e:
+    print(f"[ERROR BD] {e}")
