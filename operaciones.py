@@ -83,6 +83,19 @@ MONTO_FIJO_PRUEBA = None  # None = monto real.  Ej: 100 = forzar monto chico
 #   True  -> lo crea (usar solo si sabes lo que haces).
 CREAR_IMPUESTOS_FALTANTES = False
 
+# ── Que hacer si el impuesto elegido no tiene un TaxCode ACTIVO en QuickBooks ──
+# Pasa con "Exonerado 0%" e "IVA 8%": la TASA existe y esta activa, pero su
+# TaxCode figura como inactivo, y la linea de una factura necesita un TaxCode.
+#   False (recomendado) -> NO factura esa emision y avisa cual impuesto falta.
+#                          Es preferible frenar una factura a emitirla con un
+#                          tratamiento tributario distinto al que se eligio.
+#   True  -> la factura como "Exento". OJO: ante Hacienda NO es lo mismo que
+#            exonerado; activar solo si contabilidad lo aprueba.
+USAR_EXENTO_SI_NO_HAY_TAXCODE = False
+
+# Imprime en consola el JSON completo que se manda a QuickBooks (para depurar).
+DEBUG_PAYLOAD = True
+
 # ── CAMBIO DE MONEDA (switch "moneda invertida"): DESCONTINUADO ──────────────
 # QuickBooks NO maneja clientes multimoneda: cada cliente tiene UNA moneda fija
 # (la de sus cuentas por cobrar) y TODAS sus facturas deben ir en esa moneda.
@@ -208,6 +221,7 @@ def leer_operaciones_aprobadas(conn):
         cur.execute("""
             SELECT o.id, o.qbo_customer_id, o.compania_facturadora, o.cliente,
                    o.moneda, o.moneda_invertida, o.descripcion_factura, e.realm_id,
+                   o.observaciones_internas,
                    cq.email AS cliente_email
             FROM operaciones o
             LEFT JOIN empresas e ON e.nombre = o.compania_facturadora
@@ -229,9 +243,19 @@ def leer_lineas(conn, operacion_id):
             """
             SELECT lo.descripcion, lo.horas_trabajadas, lo.monto_por_hora,
                    lo.total_linea, lo.porcentaje_iva, lo.exonerado,
-                   s.nombre AS servicio
+                   s.nombre AS servicio,
+                   -- Impuesto EXACTO que eligio el operador en la webapp.
+                   -- Con esto el RPA ya no adivina por porcentaje: sabe cual es.
+                   -- Va LEFT JOIN a proposito: las lineas viejas (anteriores a
+                   -- este cambio) no tienen impuesto_id y caen al respaldo por
+                   -- porcentaje dentro de resolver_impuesto().
+                   imp.qbo_id     AS impuesto_qbo_id,
+                   imp.objeto     AS impuesto_objeto,
+                   imp.nombre     AS impuesto_nombre,
+                   imp.porcentaje AS impuesto_porcentaje
             FROM lineas_operacion lo
             LEFT JOIN servicios s ON s.id = lo.servicio_id
+            LEFT JOIN impuestos imp ON imp.id = lo.impuesto_id
             WHERE lo.operacion_id = %s
             ORDER BY lo.orden
         """,
@@ -305,26 +329,43 @@ def _query_qbo(realm, token, sql):
     )
 
 
-def _cargar_mapa_impuestos(realm, token):
-    """Lee los impuestos YA configurados en la empresa y arma un mapa
-    { porcentaje -> TaxCode Id }, eligiendo SIEMPRE el codigo de VENTA.
+def _cargar_resolvedor_impuestos(realm, token):
+    """Lee los impuestos de QuickBooks y arma un RESOLVEDOR para esta empresa.
 
-    El problema: una empresa tiene varios TaxCode con el mismo porcentaje (el de
-    venta, el de retencion 'R', inactivos, negativos, etc.). Para no agarrar el
-    equivocado, filtramos:
-      - Solo TaxCode ACTIVOS.
-      - Solo TaxRate de VENTA (los que en el nombre dicen 'Ventas', o cuyo
-        TaxCode dice 'IVA X%'); se descartan retenciones (RS-/RP-/RRI-/' R' /
-        'Compras') y cualquier tasa negativa o combinada (Exonerado 100%, etc.).
-    Asi es 100% dinamico: si manana agregan un IVA de venta nuevo, lo toma solo,
-    sin tocar codigo. Si no hay uno de venta valido para ese %, ese % no entra
-    al mapa (y la factura con ese % se rechaza como 'IVA no valido').
-    Se hace una vez por realm (cache)."""
+    Devuelve un dict con:
+      "rate_a_taxcode": { TaxRate Id -> TaxCode Id }   <- la traduccion clave
+      "taxcode_a_rate": { TaxCode Id -> TaxRate Id }
+      "rate_pct":       { TaxRate Id -> porcentaje }
+      "taxcodes":       set de TaxCode Ids activos y usables
+      "pct_a_taxcode":  { porcentaje -> TaxCode Id }   <- solo para lineas viejas
+      "exento":         TaxCode Id del "Exento" (0%), o None
+
+    POR QUE HACE FALTA TRADUCIR:
+      La webapp guarda en cada linea el impuesto EXACTO que eligio el operador
+      (tabla `impuestos`), y lo que guarda son objetos TaxRate. Pero la linea de
+      una factura en QuickBooks referencia un TaxCode, NO un TaxRate, y los Id
+      no son intercambiables: en la misma empresa el TaxRate 13 es "EE" y el
+      TaxCode 13 es "2% R". Mandar el Id de un TaxRate como TaxCodeRef factura
+      con el impuesto equivocado sin dar error.
+      Por eso se busca el TaxCode ACTIVO que contiene ese TaxRate exacto.
+
+    EL DESEMPATE (lo que arreglo el bug del Id 27):
+      Una misma tasa puede estar dentro de varios TaxCode. Ej. en Soportexperto
+      el TaxRate "IVA 13% (Ventas)" esta en el TaxCode "IVA 13%" (una sola tasa)
+      y tambien en "Exonerado al 100%" (que combina +13% y -13%).
+      Se prefiere SIEMPRE el TaxCode "puro" (el que tiene UNA sola tasa de
+      venta). Los compuestos solo rellenan huecos. El criterio es un DATO
+      (cuantas tasas tiene el codigo), no el nombre ni el orden en que
+      QuickBooks los devuelva: antes ganaba "el primero que apareciera" y por
+      eso se colaba "Exonerado al 100%" y las facturas salian exoneradas.
+
+    Cache por realm (una sola consulta por corrida).
+    """
     if realm in TAX_CODES_CACHE:
         return TAX_CODES_CACHE[realm]
 
-    # 1) TaxRate Id -> (valor del porcentaje, nombre del rate)
-    rate_info = {}
+    # ── 1) TaxRate Id -> porcentaje y nombre ──
+    rate_pct, rate_nombre = {}, {}
     r = _query_qbo(realm, token, "SELECT * FROM TaxRate")
     if r.status_code == 200:
         for tr in r.json().get("QueryResponse", {}).get("TaxRate", []):
@@ -332,70 +373,79 @@ def _cargar_mapa_impuestos(realm, token):
                 pct = round(float(tr.get("RateValue", 0)), 2)
             except (TypeError, ValueError):
                 continue
-            rate_info[tr["Id"]] = (pct, (tr.get("Name") or ""))
+            rid = str(tr["Id"])
+            rate_pct[rid] = pct
+            rate_nombre[rid] = tr.get("Name") or ""
 
     def es_rate_de_venta(nombre_rate):
-        """True si el TaxRate parece de VENTA (no retencion, no compra)."""
-        n = nombre_rate.lower()
-        # Descarta retenciones y compras explicitas
+        """Descarta tasas de compra y de retencion (no se facturan al cliente)."""
+        n = (nombre_rate or "").lower()
         if "(compras)" in n or "compra" in n:
             return False
         if n.startswith(("rs-", "rp-", "rri-", "rs ", "rp ", "rri ")):
             return False
-        # Marcadores claros de venta
-        if "venta" in n:
-            return True
-        if n.startswith(("ss-", "sp-", "si", "spis")):  # ventas del sistema CR
-            return True
-        # Si el nombre es 'IVA X% (Ventas)' ya entro arriba; para otros nombres
-        # neutrales (sin marca de compra/retencion) los aceptamos como venta.
         return True
 
-    # 2) TaxCode -> su porcentaje de venta (via su TaxRate de venta)
-    #    Recorremos y para cada % nos quedamos con el PRIMER TaxCode activo cuyo
-    #    rate sea de venta y positivo.
-    mapa = {}
+    rate_a_taxcode, taxcode_a_rate, pct_a_taxcode = {}, {}, {}
+    taxcodes = set()
+    exento = None
+    puros, compuestos = [], []  # (taxcode_id, [rate_ids de venta])
+
+    # ── 2) TaxCode activos: se clasifican en "puros" (1 tasa) y compuestos ──
     r = _query_qbo(realm, token, "SELECT * FROM TaxCode")
     if r.status_code == 200:
         for tc in r.json().get("QueryResponse", {}).get("TaxCode", []):
-            # Solo TaxCode activos
             if not tc.get("Active", True):
                 continue
-            nombre_tc = (tc.get("Name") or "").lower()
-            # Descarta TaxCode de retencion por nombre (terminan en ' r' o traen 'retenc')
+            tcid = str(tc["Id"])
+            nombre_tc = " ".join((tc.get("Name") or "").lower().split())
             if nombre_tc.endswith(" r") or "retenc" in nombre_tc:
                 continue
 
-            # El TaxCode "Exento" (0% de venta) se guarda aparte, bajo la clave 0.
-            # Se exige el nombre EXACTO "exento" a proposito: en cada empresa hay
-            # VARIOS codigos al 0% que NO son lo mismo ante Hacienda
-            # ("Exportacion 0%", "NO SUJETO AL IVA", "Exonerado 0%"). Agarrar el
-            # primero que aparezca seria un error contable silencioso.
-            #   Verificado: SX=23, H&N=22, Laitcorp=23 se llaman todos "Exento".
-            if nombre_tc.strip() == "exento":
-                mapa.setdefault(0, tc["Id"])
-                continue
+            taxcodes.add(tcid)
+            if nombre_tc == "exento":
+                exento = tcid
 
             detalles = (tc.get("SalesTaxRateList") or {}).get("TaxRateDetail", [])
+            rids = []
             for det in detalles:
-                rid = (det.get("TaxRateRef") or {}).get("value")
-                if rid not in rate_info:
-                    continue
-                pct, nombre_rate = rate_info[rid]
-                # Solo tasas positivas y de venta
-                if pct <= 0:
-                    continue
-                if not es_rate_de_venta(nombre_rate):
-                    continue
-                mapa.setdefault(pct, tc["Id"])  # primer code de venta con ese %
-                break
+                rid = str((det.get("TaxRateRef") or {}).get("value") or "")
+                if rid and rid in rate_pct and es_rate_de_venta(rate_nombre.get(rid)):
+                    rids.append(rid)
+            if not rids:
+                continue
+            (puros if len(rids) == 1 else compuestos).append((tcid, rids))
 
-    TAX_CODES_CACHE[realm] = mapa
-    return mapa
+    # Primero los puros: son los que ganan el desempate.
+    for tcid, rids in puros:
+        rid = rids[0]
+        rate_a_taxcode.setdefault(rid, tcid)
+        taxcode_a_rate.setdefault(tcid, rid)
+        pct = rate_pct.get(rid, 0.0)
+        if pct > 0:
+            pct_a_taxcode.setdefault(pct, tcid)
+
+    # Los compuestos solo rellenan huecos; nunca pisan a un TaxCode puro.
+    for tcid, rids in compuestos:
+        for rid in rids:
+            rate_a_taxcode.setdefault(rid, tcid)
+        taxcode_a_rate.setdefault(tcid, rids[0])
+
+    resolvedor = {
+        "rate_a_taxcode": rate_a_taxcode,
+        "taxcode_a_rate": taxcode_a_rate,
+        "rate_pct": rate_pct,
+        "taxcodes": taxcodes,
+        "pct_a_taxcode": pct_a_taxcode,
+        "exento": exento,
+    }
+    TAX_CODES_CACHE[realm] = resolvedor
+    return resolvedor
 
 
 def _crear_taxcode(porcentaje, realm, token):
-    """Crea un TaxCode con ese porcentaje (via taxservice). Devuelve su Id."""
+    """Crea un TaxCode con ese porcentaje. SOLO se usa en sandbox, para no
+    frenar las pruebas. En produccion el RPA nunca crea impuestos."""
     nombre = f"IVA {porcentaje}%"
     url = f"{CFG['base_url']}/v3/company/{realm}/taxservice/taxcode?minorversion=75"
     payload = {
@@ -420,64 +470,116 @@ def _crear_taxcode(porcentaje, realm, token):
         timeout=30,
     )
     if r.status_code in (200, 201):
-        tcid = r.json().get("TaxCodeId")
-        # refrescamos el cache para que la proxima linea lo encuentre
-        TAX_CODES_CACHE.get(realm, {})[round(float(porcentaje), 2)] = tcid
-        return tcid
+        return str(r.json().get("TaxCodeId"))
     raise RuntimeError(
         f"No se pudo crear impuesto {porcentaje}%: {r.status_code} {r.text[:200]}"
     )
 
 
-def taxcode_para(porcentaje, realm, token):
-    """Devuelve el TaxCode Id de VENTA para un porcentaje.
-    'NON' si es exento o 0%.
+def resolver_impuesto(linea, realm, token):
+    """Devuelve (taxcode_id, rate_id, porcentaje) para UNA linea de factura.
 
-    Busca DINAMICAMENTE en los impuestos configurados de la empresa (via
-    _cargar_mapa_impuestos, que ya filtra: solo activos, solo VENTA, sin
-    retenciones ni negativos). Asi, si agregan un IVA de venta nuevo en
-    QuickBooks, el RPA lo toma solo, sin tocar codigo.
+    CAMINO NORMAL (linea nueva):
+      La linea trae el impuesto que el operador eligio en la webapp
+      (impuesto_qbo_id + impuesto_objeto, desde la tabla `impuestos`). No se
+      adivina nada: se traduce ese TaxRate al TaxCode que lo contiene.
 
-    PRODUCCION: si el porcentaje no tiene un impuesto de VENTA configurado, se
-    RECHAZA con "IVA no valido" (no se factura con algo no valido).
-    SANDBOX: si no existe, lo crea, para no frenar las pruebas.
+    CAMINO DE RESPALDO (linea vieja, sin impuesto_id):
+      Se busca por porcentaje_iva / exonerado, como antes del cambio. Las
+      lineas creadas antes de que existiera `impuesto_id` siguen facturando.
+
+    rate_id se devuelve porque QuickBooks (edicion global) NO autocalcula el
+    impuesto: hay que mandarle el TxnTaxDetail con el TaxRate y el monto.
     """
-    if porcentaje is None:
-        return "NON"
-    pct = round(float(porcentaje), 2)
+    qbo_id = linea.get("impuesto_qbo_id")
+    qbo_id = str(qbo_id).strip() if qbo_id else None
+    objeto = (linea.get("impuesto_objeto") or "").strip()
+    nombre = linea.get("impuesto_nombre") or "?"
+    pct_linea = linea.get("porcentaje_iva")
+    exonerado = bool(linea.get("exonerado"))
 
-    # ── 0% / exento ──
-    # En produccion QuickBooks NO acepta la marca generica "NON": exige un
-    # TaxCode real en cada linea, incluso en las exentas. (Error 6000:
-    # "Asegurese de que todas las transacciones tengan una tasa impositiva a
-    #  las ventas antes de guardarlas".)
-    # En sandbox (empresa gringa, sin impuestos de CR) "NON" si funciona.
-    if pct == 0:
-        if ENTORNO == "sandbox":
-            return "NON"
-        mapa = _cargar_mapa_impuestos(realm, token)
-        code = mapa.get(0)
-        if code:
-            return code
+    # ── SANDBOX ──
+    # La empresa de pruebas es de EE.UU. y no tiene los impuestos de Costa Rica,
+    # asi que los Id de produccion no existen alla. Se mantiene el comportamiento
+    # anterior (match por porcentaje, creando el impuesto si falta).
+    if ENTORNO == "sandbox":
+        if exonerado or pct_linea is None or float(pct_linea) == 0:
+            return ("NON", None, 0.0)
+        pct = round(float(pct_linea), 2)
+        res = _cargar_resolvedor_impuestos(realm, token)
+        tcid = res["pct_a_taxcode"].get(pct)
+        if not tcid:
+            print(f"    impuesto {pct}% no existe en sandbox; creandolo...")
+            tcid = _crear_taxcode(pct, realm, token)
+            res["pct_a_taxcode"][pct] = tcid
+        return (tcid, None, pct)
+
+    res = _cargar_resolvedor_impuestos(realm, token)
+
+    # ── 0) El check "exonerado" MANDA sobre el impuesto del dropdown ──
+    # Si la linea viene marcada, se factura EXENTA aunque en el dropdown haya
+    # quedado seleccionado un IVA (ej. 13%). El check es la decision explicita
+    # del operador sobre esa linea y pisa cualquier otra seleccion.
+    # El codigo "Exento" se busca por empresa (su Id cambia en cada una: en
+    # Soportexperto es el 23, en Hardware y Network el 22, en Laitcorp el 23),
+    # asi que no hay nada clavado: se resuelve solo contra QuickBooks.
+    if exonerado:
+        if res["exento"]:
+            return (res["exento"], None, 0.0)
+        raise RuntimeError(
+            "IVA no valido: la linea esta marcada como exonerada pero la empresa "
+            "no tiene un impuesto de venta 'Exento' activo en QuickBooks."
+        )
+
+    # ── 1) Camino normal: la linea trae el impuesto elegido en la webapp ──
+    if qbo_id:
+        if objeto == "TaxCode":
+            if qbo_id in res["taxcodes"]:
+                rid = res["taxcode_a_rate"].get(qbo_id)
+                pct = res["rate_pct"].get(rid, 0.0) if rid else 0.0
+                return (qbo_id, rid, pct)
+            raise RuntimeError(
+                f"IVA no valido: el TaxCode '{nombre}' (Id {qbo_id}) no esta "
+                f"activo en QuickBooks para esta empresa."
+            )
+
+        # objeto == 'TaxRate' (es lo que guarda hoy la webapp)
+        tcid = res["rate_a_taxcode"].get(qbo_id)
+        if tcid:
+            return (tcid, qbo_id, res["rate_pct"].get(qbo_id, 0.0))
+
+        # No hay NINGUN TaxCode activo que contenga esa tasa. Pasa con
+        # "Exonerado 0%" y con "IVA 8%": la TASA existe y esta activa, pero su
+        # TaxCode figura como inactivo en QuickBooks, y la linea de una factura
+        # necesita un TaxCode. Se resuelve reactivando ese codigo en QBO.
+        if USAR_EXENTO_SI_NO_HAY_TAXCODE and res["exento"]:
+            print(
+                f"    [aviso] '{nombre}' no tiene TaxCode activo en QuickBooks; "
+                f"se factura como Exento (revisar con contabilidad)."
+            )
+            return (res["exento"], None, 0.0)
+        raise RuntimeError(
+            f"IVA no valido: '{nombre}' (TaxRate {qbo_id}) no tiene un TaxCode "
+            f"ACTIVO en QuickBooks para esta empresa. Hay que activarlo o "
+            f"crearlo alla antes de poder facturar con ese impuesto."
+        )
+
+    # ── 2) Respaldo: linea vieja, sin impuesto_id ──
+    if pct_linea is None or float(pct_linea) == 0:
+        if res["exento"]:
+            return (res["exento"], None, 0.0)
         raise RuntimeError(
             "IVA no valido: la empresa no tiene un impuesto de venta 'Exento' "
             "configurado en QuickBooks."
         )
-
-    mapa = _cargar_mapa_impuestos(realm, token)
-    if pct in mapa:
-        return mapa[pct]
-
-    # No hay un impuesto de VENTA con ese % en la empresa
-    if ENTORNO == "produccion":
-        raise RuntimeError(
-            f"IVA no valido: {pct}% no esta configurado como impuesto de venta "
-            f"para esta empresa en QuickBooks."
-        )
-
-    # SANDBOX: lo crea para poder seguir probando
-    print(f"    impuesto {pct}% no existe en sandbox; creandolo...")
-    return _crear_taxcode(pct, realm, token)
+    pct = round(float(pct_linea), 2)
+    tcid = res["pct_a_taxcode"].get(pct)
+    if tcid:
+        return (tcid, res["taxcode_a_rate"].get(tcid), pct)
+    raise RuntimeError(
+        f"IVA no valido: {pct}% no esta configurado como impuesto de venta "
+        f"para esta empresa en QuickBooks."
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -518,17 +620,23 @@ def moneda_factura(moneda_operacion, invertir):
 
 def item_para(realm, nombre_servicio=None):
     mapeo_empresa = MAPA_SERVICIOS_BD.get(realm, {})
-    
-    print(f"\n[DEBUG ITEM_PARA OPERACIONES] realm: {realm}, nombre_servicio webapp: '{nombre_servicio}'")
+
+    print(
+        f"\n[DEBUG ITEM_PARA OPERACIONES] realm: {realm}, nombre_servicio webapp: '{nombre_servicio}'"
+    )
     print(f"[DEBUG ITEM_PARA OPERACIONES] mapeo_empresa para {realm}: {mapeo_empresa}")
-    
+
     if nombre_servicio and nombre_servicio in mapeo_empresa:
-        print(f"[DEBUG ITEM_PARA OPERACIONES] -> Encontrado! ID QBO: {mapeo_empresa[nombre_servicio]}\n")
+        print(
+            f"[DEBUG ITEM_PARA OPERACIONES] -> Encontrado! ID QBO: {mapeo_empresa[nombre_servicio]}\n"
+        )
         return mapeo_empresa[nombre_servicio]
 
     defaults = CFG.get("item_operaciones_default", {})
     id_default = defaults.get(realm)
-    print(f"[DEBUG ITEM_PARA OPERACIONES] -> NO encontrado. Usando default: {id_default}\n")
+    print(
+        f"[DEBUG ITEM_PARA OPERACIONES] -> NO encontrado. Usando default: {id_default}\n"
+    )
     return id_default
 
 
@@ -549,24 +657,24 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
     lineas_qbo = []
     codigos_gravados = set()  # taxcode ids usados (para el global del sandbox)
 
-    def agregar(amount_bd, qty, unit, desc, porcentaje, exonerado, servicio=None):
-        # OJO: `amount_bd` (el total guardado en la base) se recibe pero NO se
-        # usa para la factura: el Amount se DERIVA de qty x unit (ver abajo).
-        if exonerado:
-            # 'exonerado' en la webapp significa EXENTO (la linea no lleva IVA).
-            # taxcode_para(0) devuelve el TaxCode "Exento" real de la empresa en
-            # produccion, y "NON" en sandbox.
-            code = taxcode_para(0, realm, token)
-        else:
-            code = taxcode_para(porcentaje, realm, token)
-            if code not in ("NON", "TAX"):
-                codigos_gravados.add(code)
-        # En produccion la linea lleva el Id real del impuesto (QBO calcula).
+    # Acumuladores del calculo manual de IVA en produccion (ver TxnTaxDetail
+    # mas abajo): QuickBooks en edicion global no lo autocalcula por API.
+    tax_lines = {}
+    total_tax = 0.0
+
+    def agregar(linea, qty, unit, desc, servicio=None):
+        """Agrega una linea a la factura. `linea` es el registro de la base:
+        de ahi sale el impuesto que eligio el operador en la webapp."""
+        nonlocal total_tax
+
+        code, rate_id, pct = resolver_impuesto(linea, realm, token)
+        if code not in ("NON", "TAX"):
+            codigos_gravados.add(code)
+
+        # En produccion la linea lleva el Id real del TaxCode.
         # En sandbox la linea va "TAX"/"NON" y el impuesto se inyecta global.
-        if exonerado:
-            line_ref = str(code)
-        elif ENTORNO == "sandbox":
-            line_ref = "TAX"
+        if ENTORNO == "sandbox":
+            line_ref = "NON" if code == "NON" else "TAX"
         else:
             line_ref = str(code)
 
@@ -580,6 +688,17 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
         qty_f = float(qty)
         unit_final = convertir_monto(unit, moneda_op, invertir, tc_venta)
         amount_final = round(qty_f * unit_final, 2)
+
+        # QuickBooks (edicion global) NO autocalcula el impuesto por API: hay que
+        # mandarle el TxnTaxDetail con la tasa y el monto. Solo suma si la tasa
+        # es > 0 (una linea exenta/exonerada aporta 0 y no debe sumar).
+        if ENTORNO == "produccion" and rate_id and pct > 0:
+            tax_amt = round(amount_final * (pct / 100.0), 2)
+            total_tax += tax_amt
+            if rate_id not in tax_lines:
+                tax_lines[rate_id] = {"amount": 0.0, "net": 0.0, "pct": pct}
+            tax_lines[rate_id]["amount"] += tax_amt
+            tax_lines[rate_id]["net"] += amount_final
 
         lineas_qbo.append(
             {
@@ -596,23 +715,21 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
         )
 
     if MONTO_FIJO_PRUEBA is not None:
+        # Linea sintetica: no viene de la base, asi que no trae impuesto_id y
+        # resolver_impuesto() la resuelve por porcentaje (camino de respaldo).
         agregar(
-            MONTO_FIJO_PRUEBA,
+            {"porcentaje_iva": 13, "exonerado": False},
             1,
             MONTO_FIJO_PRUEBA,
             "FACTURA DE PRUEBA - anular con nota de credito",
-            13,
-            False,
         )
     else:
         for ln in lineas:
             agregar(
-                ln["total_linea"],
+                ln,
                 ln["horas_trabajadas"],
                 ln["monto_por_hora"],
                 ln["descripcion"],
-                ln["porcentaje_iva"],
-                ln["exonerado"],
                 servicio=ln.get("servicio"),
             )
 
@@ -625,11 +742,38 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
     if ENTORNO == "produccion":
         factura["GlobalTaxCalculation"] = "TaxExcluded"
 
+        # QuickBooks en edicion global (fuera de EE.UU.) NO calcula el IVA solo
+        # cuando la factura entra por API: si no se manda el TxnTaxDetail, asume
+        # impuesto 0 y la factura sale exenta aunque las lineas tengan IVA.
+        if total_tax > 0:
+            factura["TxnTaxDetail"] = {
+                "TotalTax": round(total_tax, 2),
+                "TaxLine": [
+                    {
+                        "Amount": round(d["amount"], 2),
+                        "DetailType": "TaxLineDetail",
+                        "TaxLineDetail": {
+                            "TaxRateRef": {"value": str(rate_id)},
+                            "PercentBased": True,
+                            "TaxPercent": d["pct"],
+                            "NetAmountTaxable": round(d["net"], 2),
+                        },
+                    }
+                    for rate_id, d in tax_lines.items()
+                ],
+            }
+
     # Correo del cliente: QuickBooks NO lo hereda del perfil al crear la factura
     # por API, y sin correo el Facturador Plus no puede despacharla a Hacienda.
     # Sale de la tabla espejo clientes_quickbooks (la llena sync_clientes.py).
     if correo_cliente:
         factura["BillEmail"] = {"Address": correo_cliente}
+
+    # Nota interna: va como PrivateNote, que en QuickBooks es la nota privada
+    # (la ve el equipo, NO el cliente en el PDF de la factura). Mismo criterio
+    # que en contratos fijos.
+    if op.get("observaciones_internas"):
+        factura["PrivateNote"] = op["observaciones_internas"]
 
     # SANDBOX: aplica UN impuesto global (limitacion del sandbox gringo).
     #   - 1 solo porcentaje  -> exacto.
@@ -651,6 +795,11 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
     # asi se puede verificar la aritmetica del tipo de cambio en las pruebas.
     if CFG["usar_moneda_real"]:
         factura["CurrencyRef"] = {"value": moneda_factura(moneda_op, invertir)}
+
+    # Debug al FINAL: aca la factura ya esta completa (impuestos, correo, moneda).
+    if DEBUG_PAYLOAD:
+        print("PAYLOAD FACTURA DEBUG:")
+        print(json.dumps(factura, indent=2, ensure_ascii=False))
 
     return factura
 
@@ -908,8 +1057,14 @@ def main():
 
                 # Moneda con la que realmente se emitio la factura (dinamica):
                 # si la operacion invierte, es la contraria a la de la operacion.
+                # Misma condicion que usa construir_factura: si el cambio de
+                # moneda esta descontinuado, la factura sale en la moneda del
+                # contrato aunque la fila tenga moneda_invertida=true. El
+                # reporte y las metricas tienen que decir lo mismo que se
+                # facturo, no lo que dice el flag viejo de la base.
                 moneda_emitida = moneda_factura(
-                    op.get("moneda") or "Dólares", bool(op.get("moneda_invertida"))
+                    op.get("moneda") or "Dólares",
+                    bool(op.get("moneda_invertida")) and CAMBIO_MONEDA_HABILITADO,
                 )
 
                 # --- Metricas de exito (monto real de QBO, por moneda) ---
