@@ -209,6 +209,7 @@ def main():
         for emp in EMPRESAS:
             token = refrescar_token(emp["realm"])
             if not token:
+                print('sin token')
                 continue
 
             facturas = descargar_facturas(emp["realm"], token)
