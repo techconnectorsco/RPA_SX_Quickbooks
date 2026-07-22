@@ -51,6 +51,7 @@ from supabase_manager import (
     ID_RPA_FIJOS,
 )
 from teams_notifier import enviar_tarjeta_ejecucion
+import simulacion
 from teams_resumen import resumen_contratos_fijos
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -81,6 +82,13 @@ CREAR_IMPUESTOS_FALTANTES = False
 #   True  -> la factura como "Exento". OJO: ante Hacienda NO es lo mismo que
 #            exonerado; activar solo si contabilidad lo aprueba.
 USAR_EXENTO_SI_NO_HAY_TAXCODE = False
+
+# ── CORRIDA EN FRIO ──────────────────────────────────────────────────────────
+# True = hace TODO el recorrido real (base + QuickBooks, solo lectura) pero NO
+# crea ninguna factura, NO escribe en la base y NO reporta a Supabase/Teams.
+# Al final imprime que habria pasado con cada emision y deja los payloads en un
+# JSON. Sirve para validar contra datos reales sin emitir nada.
+SIMULACION = True
 
 # Imprime en consola el JSON completo que se manda a QuickBooks (para depurar).
 DEBUG_PAYLOAD = True
@@ -941,6 +949,8 @@ def main():
         print(f"   *** LIMITE: {LIMITE_FACTURAS} factura(s) ***")
     if IGNORAR_DIA_EMISION:
         print("   *** IGNORANDO dia_emision (modo prueba) ***")
+    if SIMULACION:
+        print("   *** CORRIDA EN FRIO: no se creara ninguna factura ***")
     print("=" * 60)
 
     # Orquestador de reporte PDF (contratos fijos, archivo aparte)
@@ -1056,9 +1066,25 @@ def main():
                     tc_venta,
                     correo_cliente=em.get("cliente_email"),
                 )
-                inv = enviar_factura(realm, tokens[realm], factura)
-
-                marcar_emitida(conn, eid, inv, tc_venta)
+                if SIMULACION:
+                    # Corrida en frio: se verifica la factura pero NO se envia
+                    # a QuickBooks ni se toca la base.
+                    avisos = [
+                        simulacion.verificar_moneda_cliente(
+                            _query_qbo,
+                            realm,
+                            tokens[realm],
+                            em.get("qbo_customer_id"),
+                            (factura.get("CurrencyRef") or {}).get("value"),
+                        )
+                    ]
+                    simulacion.registrar(
+                        f"{cliente_lbl} | {cliente_nom} ({tipo})", factura, avisos
+                    )
+                    inv = simulacion.factura_simulada(factura)
+                else:
+                    inv = enviar_factura(realm, tokens[realm], factura)
+                    marcar_emitida(conn, eid, inv, tc_venta)
 
                 # Moneda con la que realmente se emitio la factura (dinamica)
                 # Misma condicion que usa construir_factura: si el cambio de
@@ -1101,7 +1127,8 @@ def main():
                     f"  [OK]   {cliente_lbl} ({tipo}): factura {inv.get('DocNumber')} total {inv.get('TotalAmt')}"
                 )
             except Exception as e:
-                marcar_error(conn, eid, e)
+                if not SIMULACION:
+                    marcar_error(conn, eid, e)
                 status_global_ejecution["con_error"] += 1
                 clasificar_error_metricas(str(e))
                 reporte.registrar_emision(
@@ -1124,6 +1151,14 @@ def main():
     if ruta_pdf:
         print(f"Log PDF: {ruta_pdf}")
     print("=" * 60)
+
+    if SIMULACION:
+        simulacion.resumen()
+        simulacion.guardar_json(
+            os.path.join("logs", f"simulacion_fijos_{hoy.isoformat()}.json")
+        )
+        print("\n(Corrida en frio: no se reporta a Supabase ni a Teams.)")
+        return
 
     # ── Reporte de metricas a Supabase (mismo patron que los otros RPAs) ──
     duracion = int(time.time() - inicio)
