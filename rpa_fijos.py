@@ -88,7 +88,7 @@ USAR_EXENTO_SI_NO_HAY_TAXCODE = False
 # crea ninguna factura, NO escribe en la base y NO reporta a Supabase/Teams.
 # Al final imprime que habria pasado con cada emision y deja los payloads en un
 # JSON. Sirve para validar contra datos reales sin emitir nada.
-SIMULACION = True
+SIMULACION = False
 
 # Imprime en consola el JSON completo que se manda a QuickBooks (para depurar).
 DEBUG_PAYLOAD = True
