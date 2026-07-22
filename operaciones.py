@@ -57,7 +57,7 @@ from supabase_manager import (
     finalizar_y_reportar,
     ID_RPA_OPERACIONES,
 )
-from teams_notifier import enviar_tarjeta_ejecucion
+from teams_notifier import enviar_tarjeta_ejecucion, enviar_tarjeta_simple
 import simulacion
 from teams_resumen import resumen_operaciones
 
@@ -99,7 +99,7 @@ USAR_EXENTO_SI_NO_HAY_TAXCODE = False
 # crea ninguna factura, NO escribe en la base y NO reporta a Supabase/Teams.
 # Al final imprime que habria pasado con cada emision y deja los payloads en un
 # JSON. Sirve para validar contra datos reales sin emitir nada.
-SIMULACION = True
+SIMULACION = False
 
 # Imprime en consola el JSON completo que se manda a QuickBooks (para depurar).
 DEBUG_PAYLOAD = True
@@ -640,6 +640,7 @@ def item_para(realm, nombre_servicio=None):
         )
         return mapeo_empresa[nombre_servicio]
 
+    # Si el servicio no esta en el mapa, usamos el default de la empresa
     defaults = CFG.get("item_operaciones_default", {})
     id_default = defaults.get(realm)
     print(
@@ -1154,14 +1155,19 @@ def main():
         if conn is not None:
             conn.close()
 
-    # LLAMADA CORRECTA: Compila los datos acumulados y escribe el PDF físico
-    ruta_pdf = reporte.exportar_pdf()
+    # Si no habia ninguna operacion aprobada, no tiene sentido generar un PDF
+    # en blanco: no hay nada que reportar.
+    hubo_trabajo = status_global_ejecution["total_operaciones"] > 0
 
-    # Resumen final usando los contadores internos de tu propia clase
+    ruta_pdf = reporte.exportar_pdf() if hubo_trabajo else None
+
     print("\n" + "=" * 60)
-    print(f"Listo. Facturadas: {reporte.exitosas}   Errores: {reporte.errores}")
-    if ruta_pdf:
-        print(f"Log PDF: {ruta_pdf}")
+    if hubo_trabajo:
+        print(f"Listo. Facturadas: {reporte.exitosas}   Errores: {reporte.errores}")
+        if ruta_pdf:
+            print(f"Log PDF: {ruta_pdf}")
+    else:
+        print("No habia operaciones aprobadas (sin PDF y sin aviso a Teams).")
     print("=" * 60)
 
     if SIMULACION:
@@ -1181,6 +1187,8 @@ def main():
     status_global_ejecution["entorno"] = ENTORNO
     if MONTO_FIJO_PRUEBA is not None:
         status_global_ejecution["tipo_ejecucion"] = "Prueba"
+    elif not hubo_trabajo:
+        status_global_ejecution["tipo_ejecucion"] = "Sin operaciones aprobadas"
     # Redondeo de montos para dejarlos limpios
     status_global_ejecution["monto_total_usd"] = round(
         status_global_ejecution["monto_total_usd"], 2
@@ -1202,7 +1210,25 @@ def main():
         # Un fallo al reportar metricas NUNCA debe tumbar la corrida de facturacion
         print(f"[aviso] No se pudo reportar a Supabase: {e_sup}")
 
-    # ── Notificacion a Microsoft Teams (tarjeta + boton al PDF) ──
+    # ── Notificacion a Microsoft Teams ──
+    # Sin operaciones aprobadas se manda una tarjeta MINIMA en vez de la
+    # completa: una tarjeta con todo en cero es ruido, pero el silencio total
+    # tampoco sirve (no se distingue "no habia nada" de "el robot no corrio").
+    if not hubo_trabajo:
+        try:
+            enviar_tarjeta_simple(
+                webhook_url=os.getenv("TEAMS_WEBHOOK_URL"),
+                titulo="RPA Facturacion - Operaciones",
+                subtitulo=(
+                    f"{ENTORNO.upper()}  -  "
+                    f"{datetime.date.today().strftime('%d/%m/%Y')}"
+                ),
+                mensaje="Ejecucion correcta. No habia operaciones aprobadas para facturar.",
+            )
+        except Exception as e_teams:
+            print(f"[aviso] No se pudo notificar a Teams: {e_teams}")
+        return
+
     # La URL del flujo sale del .env; si no esta, el modulo no notifica y sigue.
     try:
         hechos, texto_pie = resumen_operaciones(status_global_ejecution)

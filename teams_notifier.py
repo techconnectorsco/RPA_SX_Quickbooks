@@ -205,3 +205,42 @@ def enviar_tarjeta_ejecucion(
         url_pdf=url_pdf,
     )
     return enviar_a_teams(webhook_url, card)
+
+
+def enviar_tarjeta_simple(webhook_url, titulo, subtitulo, mensaje):
+    """Tarjeta MINIMA de latido: solo avisa que el RPA se ejecuto y que no
+    habia nada que hacer.
+
+    A diferencia de enviar_tarjeta_ejecucion(), no lleva tabla de datos, ni
+    barra de color, ni boton al PDF: es un aviso de una linea. La idea es que
+    el equipo sepa que el robot esta encendido y paso por ahi, sin llenar el
+    canal con tarjetas de ceros los dias sin emisiones.
+    """
+    card = {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.4",
+        "body": [
+            {
+                "type": "TextBlock",
+                "text": titulo,
+                "weight": "Bolder",
+                "size": "Medium",
+                "wrap": True,
+            },
+            {
+                "type": "TextBlock",
+                "text": subtitulo,
+                "isSubtle": True,
+                "spacing": "None",
+                "wrap": True,
+            },
+            {
+                "type": "TextBlock",
+                "text": mensaje,
+                "wrap": True,
+                "spacing": "Small",
+            },
+        ],
+    }
+    return enviar_a_teams(webhook_url, card)

@@ -50,7 +50,7 @@ from supabase_manager import (
     finalizar_y_reportar,
     ID_RPA_FIJOS,
 )
-from teams_notifier import enviar_tarjeta_ejecucion
+from teams_notifier import enviar_tarjeta_ejecucion, enviar_tarjeta_simple
 import simulacion
 from teams_resumen import resumen_contratos_fijos
 
@@ -1145,11 +1145,19 @@ def main():
     finally:
         conn.close()
 
-    ruta_pdf = reporte.exportar_pdf()
+    # Si hoy no tocaba facturar ninguna emision, no tiene sentido generar un PDF
+    # en blanco: no hay nada que reportar. (Las emisiones en [espera] no cuentan:
+    # el RPA corre todos los dias pero solo factura las del dia de emision.)
+    hubo_trabajo = status_global_ejecution["total_a_facturar"] > 0
+
+    ruta_pdf = reporte.exportar_pdf() if hubo_trabajo else None
     print("\n" + "=" * 60)
-    print(f"Listo. Facturadas: {reporte.exitosas}   Errores: {reporte.errores}")
-    if ruta_pdf:
-        print(f"Log PDF: {ruta_pdf}")
+    if hubo_trabajo:
+        print(f"Listo. Facturadas: {reporte.exitosas}   Errores: {reporte.errores}")
+        if ruta_pdf:
+            print(f"Log PDF: {ruta_pdf}")
+    else:
+        print("Hoy no habia emisiones para facturar (sin PDF y sin aviso a Teams).")
     print("=" * 60)
 
     if SIMULACION:
@@ -1164,6 +1172,8 @@ def main():
     duracion = int(time.time() - inicio)
     status_global_ejecution["tiempo_ejecucion"] = f"{duracion // 60}m {duracion % 60}s"
     status_global_ejecution["entorno"] = ENTORNO
+    if not hubo_trabajo:
+        status_global_ejecution["tipo_ejecucion"] = "Sin emisiones del dia"
     status_global_ejecution["monto_total_usd"] = round(
         status_global_ejecution["monto_total_usd"], 2
     )
@@ -1183,7 +1193,32 @@ def main():
     except Exception as e_sup:
         print(f"[aviso] No se pudo reportar a Supabase: {e_sup}")
 
-    # ── Notificacion a Microsoft Teams (tarjeta + boton al PDF) ──
+    # ── Notificacion a Microsoft Teams ──
+    # Sin emisiones del dia se manda una tarjeta MINIMA en vez de la completa:
+    # una tarjeta con todo en cero es ruido, pero el silencio total tampoco
+    # sirve (no se distingue "no habia nada" de "el robot no corrio"). Con el
+    # aviso corto el equipo sabe que el RPA se ejecuto y no tenia trabajo.
+    if not hubo_trabajo:
+        en_espera = status_global_ejecution.get("emisiones_en_espera", 0)
+        detalle = (
+            f" Quedan {en_espera} emision(es) para otros dias del mes."
+            if en_espera
+            else ""
+        )
+        try:
+            enviar_tarjeta_simple(
+                webhook_url=os.getenv("TEAMS_WEBHOOK_URL"),
+                titulo="RPA Facturacion - Contratos Fijos",
+                subtitulo=f"{ENTORNO.upper()}  -  {hoy.strftime('%d/%m/%Y')}",
+                mensaje=(
+                    "Ejecucion correcta. Hoy no habia emisiones para facturar."
+                    + detalle
+                ),
+            )
+        except Exception as e_teams:
+            print(f"[aviso] No se pudo notificar a Teams: {e_teams}")
+        return
+
     try:
         hechos, texto_pie = resumen_contratos_fijos(status_global_ejecution)
         enviar_tarjeta_ejecucion(
