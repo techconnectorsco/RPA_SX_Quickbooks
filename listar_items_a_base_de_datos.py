@@ -152,9 +152,8 @@ def mostrar_items(items):
 
 def guardar_items_bd(items, conn, empresa_id):
     """Guarda o actualiza los items en la tabla `servicios`.
-    Distingue insertados de actualizados usando la clausula RETURNING con
-    xmax (0 = fila nueva, distinto de 0 = fila que ya existia y se actualizo).
-    Hace UN commit por empresa: si algo falla, esa empresa no queda a medias."""
+    Luego, si el item tiene una clase en QuickBooks, la inserta/actualiza
+    en la tabla `clases` relacionandola al servicio creado."""
     cur = conn.cursor()
     insertados = 0
     actualizados = 0
@@ -169,6 +168,10 @@ def guardar_items_bd(items, conn, empresa_id):
             descripcion = fqn if fqn and fqn != nombre else it.get("Type", "")
             activa = bool(it.get("Active", True))
 
+            # Extraer el nombre de la clase de QuickBooks (si existe)
+            clase_nombre = (it.get("ClassRef") or {}).get("name", "")
+
+            # 1. Insertar o actualizar en SERVICIOS
             cur.execute(
                 """
                 INSERT INTO servicios (nombre, descripcion, activa, qbo_item_id, empresa_id)
@@ -178,15 +181,38 @@ def guardar_items_bd(items, conn, empresa_id):
                     activa = EXCLUDED.activa,
                     qbo_item_id = EXCLUDED.qbo_item_id,
                     actualizado_en = NOW()
-                RETURNING (xmax = 0) AS es_nuevo
+                RETURNING id, (xmax = 0) AS es_nuevo
                 """,
                 (nombre, descripcion, activa, qbo_id, empresa_id),
             )
-            es_nuevo = cur.fetchone()[0]
+
+            # Obtener el UUID del servicio recién insertado o actualizado
+            resultado = cur.fetchone()
+            servicio_id = resultado[0]
+            es_nuevo = resultado[1]
+
             if es_nuevo:
                 insertados += 1
             else:
                 actualizados += 1
+
+            # 2. Insertar o actualizar en CLASES (si el item tiene clase en QBO)
+            if clase_nombre:
+                cur.execute(
+                    """
+                    INSERT INTO clases (servicio_id, nombre, activa)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (servicio_id, nombre) DO UPDATE SET
+                        activa = EXCLUDED.activa,
+                        actualizado_en = NOW()
+                    """,
+                    (
+                        servicio_id,
+                        clase_nombre,
+                        activa,
+                    ),  # Heredamos el estado activo del servicio
+                )
+
         conn.commit()  # un solo commit por empresa
     except Exception as e:
         conn.rollback()
