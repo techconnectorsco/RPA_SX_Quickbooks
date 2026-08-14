@@ -8,19 +8,13 @@ Corre TODOS los dias (idealmente al mediodia hora CR). Cada dia:
   3. Solo si HOY es el dia de emision del contrato (dia_emision), ajustado
      al mes: si el contrato pide 31 y el mes tiene 30, se usa el 30; si pide
      29/30/31 y es febrero, se usa el ultimo dia de febrero.
-  4. (Las 'no_facturar' nunca llegan: quedan en estado 'No facturar', no 'Lista'.)
+  4. (Las 'no_facturar' nunca llegan: quedan en estado 'No facturar')
 
 Para cada emision que pasa los 4 filtros, arma la factura segun su tipo:
   - facturar_completo -> todas las lineas del contrato (IVA dinamico por linea).
   - porcentaje        -> UNA linea por el % del total + nota en la factura.
   - monto_parcial     -> UNA linea por el monto exacto + nota en la factura.
 
-Si la emision tiene monedaInvertida = true, factura en la moneda CONTRARIA
-del contrato, resolviendo el tipo de cambio (venta) del dia con tipo_cambio.py,
-y guarda la tasa usada en tipo_cambio_usado.
-
-En QuickBooks SOLO CREA la factura (no la envia ni la transmite a Hacienda).
-La encargada la revisa, la envia al cliente y le da ruta a Hacienda.
 
 Un solo interruptor (ENTORNO) cambia entre SANDBOX y PRODUCCION.
 
