@@ -717,9 +717,17 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
 
     if tipo == "facturar_completo":
         for ln in lineas:
-            qty = float(ln["cantidad"])
+            # 1. Detectar si es línea DescriptionOnly (sin servicio y sin cantidad)
+            if not ln.get("servicio") and ln.get("cantidad") is None:
+                lineas_qbo.append(
+                    {"DetailType": "DescriptionOnly", "Description": ln["descripcion"]}
+                )
+                continue
+
+            # 2. Es línea de cobro normal
+            qty = float(ln.get("cantidad") or 0)
             unit_price = convertir_monto(
-                ln["monto_por_unidad"], moneda_contrato, invertir, tc_venta
+                ln.get("monto_por_unidad") or 0, moneda_contrato, invertir, tc_venta
             )
             amount = round(qty * unit_price, 2)
             lineas_qbo.append(
@@ -736,10 +744,10 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
                 }
             )
     else:
-        # porcentaje o monto_parcial -> UNA sola linea + nota explicativa
         base_total = sum(
-            float(l["total_linea"]) for l in lineas
+            float(l.get("total_linea") or 0) for l in lineas
         )  # subtotal del contrato
+
         if tipo == "porcentaje":
             pct = float(em.get("porcentaje_real") or 0)
             monto_base = base_total * pct / 100.0
@@ -754,14 +762,20 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
                 "para este periodo."
             )
 
-        # IVA del cobro parcial: la factura lleva UNA sola linea, asi que se toma
-        # como referencia el impuesto de la primera linea GRAVADA del contrato
-        # (si todas son exentas, el de la primera linea). Con IVA mezclado esto
-        # es una aproximacion; con un solo IVA (el caso normal) es exacto.
-        linea_ref = next((l for l in lineas if not l["exonerado"]), None) or lineas[0]
+        # Buscamos la primera línea real (que tenga servicio) para usar de referencia en parciales
+        linea_con_servicio = (
+            next((l for l in lineas if l.get("servicio")), None) or lineas[0]
+        )
 
-        # Tomamos el primer servicio de la lista para la factura colapsada
-        primer_servicio = lineas[0].get("servicio") if lineas else None
+        # IVA del cobro parcial basado en la primera línea real no exonerada
+        linea_ref = (
+            next(
+                (l for l in lineas if not l.get("exonerado") and l.get("servicio")),
+                None,
+            )
+            or linea_con_servicio
+        )
+        primer_servicio = linea_con_servicio.get("servicio")
 
         # Qty = 1, asi que Amount y UnitPrice son el mismo numero: cuadra solo.
         unit_price = convertir_monto(monto_base, moneda_contrato, invertir, tc_venta)
