@@ -1,6 +1,7 @@
 import psycopg2
 import pyodbc
 from decimal import Decimal
+import time
 
 # ─── CONEXIÓN POSTGRESQL (origen, lectura) ──────────────────
 PG_CONFIG = {
@@ -30,14 +31,16 @@ LOTE = 1000  # filas por lote
 
 
 def leer_pg(cur, tabla, columnas):
+    print(f"  Ejecutando consulta en {tabla}... (puede tardar unos segundos)")
     cur.execute(f"SELECT {', '.join(columnas)} FROM {tabla};")
     filas = cur.fetchall()
-    # Convertir Decimal -> float para evitar el error de precisión en pyodbc
+    print(f"  Leidas {len(filas)} filas de {tabla}. Convirtiendo...")
     convertidas = []
     for fila in filas:
         convertidas.append(
             tuple(float(v) if isinstance(v, Decimal) else v for v in fila)
         )
+    print(f"  Listo para escribir {len(convertidas)} filas en SQL Server.")
     return convertidas
 
 
@@ -47,11 +50,6 @@ def chunk(lista, n):
 
 
 def sincronizar(sql, tabla, columnas, filas, update_cols):
-    """
-    Carga por lotes usando tabla temporal + MERGE.
-    - Inserta todas las filas del lote en #tmp (rápido, fast_executemany).
-    - MERGE de #tmp -> tabla real: UPDATE si existe (por id), INSERT si no.
-    """
     if not filas:
         print(f"  {tabla}: sin filas.")
         return
@@ -65,15 +63,16 @@ def sincronizar(sql, tabla, columnas, filas, update_cols):
     insert_cols = ", ".join(columnas)
     insert_vals = ", ".join([f"origen.{c}" for c in columnas])
 
+    total_filas = len(filas)
     total = 0
+    inicio = time.time()
+    print(f"  --- Escribiendo {total_filas} filas en {tabla} (lotes de {LOTE}) ---")
+
     for lote in chunk(filas, LOTE):
-        # 1. Crear tabla temporal con misma estructura que la real
         cur.execute(f"SELECT TOP 0 {cols_list} INTO #tmp FROM dbo.{tabla};")
-        # 2. Insertar el lote en la temporal (por lotes, rápido)
         cur.executemany(
             f"INSERT INTO #tmp ({cols_list}) VALUES ({placeholders});", lote
         )
-        # 3. MERGE de la temporal a la tabla real
         cur.execute(f"""
             MERGE dbo.{tabla} AS destino
             USING #tmp AS origen
@@ -81,12 +80,14 @@ def sincronizar(sql, tabla, columnas, filas, update_cols):
             WHEN MATCHED THEN UPDATE SET {set_clause}
             WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals});
         """)
-        # 4. Limpiar la temporal para el siguiente lote
         cur.execute("DROP TABLE #tmp;")
         sql.commit()
         total += len(lote)
-        print(f"  {tabla}: {total}/{len(filas)}")
+        pct = (total / total_filas) * 100
+        transcurrido = time.time() - inicio
+        print(f"  {tabla}: {total}/{total_filas} ({pct:.1f}%) - {transcurrido:.0f}s")
 
+    print(f"  --- {tabla} completada en {time.time() - inicio:.0f}s ---")
     cur.close()
 
 
