@@ -57,6 +57,24 @@ def sincronizar(sql, tabla, columnas, filas, update_cols):
     cur = sql.cursor()
     cur.fast_executemany = True
 
+    # Forzar que las columnas de texto se traten como NVARCHAR(MAX)
+    # para evitar el truncado con fast_executemany
+    tipos = []
+    for c in columnas:
+        if c in (
+            "customer_memo",
+            "free_form_address",
+            "description",
+            "customer_name",
+            "item_ref_name",
+            "bill_email",
+        ):
+            tipos.append((pyodbc.SQL_WVARCHAR, 0, 0))  # 0 = MAX
+        else:
+            tipos.append(None)
+    cur.setinputsizes(tipos)
+    cur.fast_executemany = True
+
     cols_list = ", ".join(columnas)
     placeholders = ", ".join(["?"] * len(columnas))
     set_clause = ", ".join([f"destino.{c} = origen.{c}" for c in update_cols])
