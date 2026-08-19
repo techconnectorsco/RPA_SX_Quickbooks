@@ -1,5 +1,6 @@
 import psycopg2
 import pyodbc
+from decimal import Decimal
 
 # ─── CONEXIÓN POSTGRESQL (origen, lectura) ──────────────────
 PG_CONFIG = {
@@ -30,7 +31,14 @@ LOTE = 1000  # filas por lote
 
 def leer_pg(cur, tabla, columnas):
     cur.execute(f"SELECT {', '.join(columnas)} FROM {tabla};")
-    return cur.fetchall()
+    filas = cur.fetchall()
+    # Convertir Decimal -> float para evitar el error de precisión en pyodbc
+    convertidas = []
+    for fila in filas:
+        convertidas.append(
+            tuple(float(v) if isinstance(v, Decimal) else v for v in fila)
+        )
+    return convertidas
 
 
 def chunk(lista, n):
