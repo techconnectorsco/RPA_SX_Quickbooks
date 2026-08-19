@@ -7,7 +7,7 @@ PG_CONFIG = {
     "port": "5432",
     "dbname": "facturacion_db",
     "user": "powerbi_ro",
-    "password": 'P0w3rB1$Kirkby07',
+    "password": "P0w3rB1$Kirkby07",
 }
 
 # ─── CONEXIÓN SQL SERVER (destino, escritura) ───────────────
@@ -25,97 +25,61 @@ SQL_CONN_STR = (
     "TrustServerCertificate=yes;"
 )
 
+LOTE = 1000  # filas por lote
+
 
 def leer_pg(cur, tabla, columnas):
     cur.execute(f"SELECT {', '.join(columnas)} FROM {tabla};")
     return cur.fetchall()
 
 
-def merge_empresas(sql_cur, filas):
-    sql = """
-        MERGE dbo.empresas AS destino
-        USING (SELECT ? AS id, ? AS nombre, ? AS nombre_corto, ? AS realm_id,
-                      ? AS activa, ? AS creado_en, ? AS actualizado_en) AS origen
-        ON destino.id = origen.id
-        WHEN MATCHED THEN UPDATE SET
-            nombre = origen.nombre, nombre_corto = origen.nombre_corto,
-            realm_id = origen.realm_id, activa = origen.activa,
-            actualizado_en = origen.actualizado_en
-        WHEN NOT MATCHED THEN INSERT
-            (id, nombre, nombre_corto, realm_id, activa, creado_en, actualizado_en)
-            VALUES (origen.id, origen.nombre, origen.nombre_corto, origen.realm_id,
-                    origen.activa, origen.creado_en, origen.actualizado_en);
+def chunk(lista, n):
+    for i in range(0, len(lista), n):
+        yield lista[i : i + n]
+
+
+def sincronizar(sql, tabla, columnas, filas, update_cols):
     """
-    for f in filas:
-        sql_cur.execute(sql, f)
-
-
-def merge_facturas(sql_cur, filas):
-    sql = """
-        MERGE dbo.facturas_quickbooks AS destino
-        USING (SELECT ? AS id, ? AS empresa_id, ? AS qbo_id, ? AS sync_token,
-                      ? AS doc_number, ? AS txn_date, ? AS due_date,
-                      ? AS qbo_create_time, ? AS qbo_last_updated_time,
-                      ? AS qbo_customer_id, ? AS customer_name, ? AS bill_email,
-                      ? AS free_form_address, ? AS currency, ? AS exchange_rate,
-                      ? AS total_amt, ? AS home_total_amt, ? AS balance,
-                      ? AS home_balance, ? AS print_status, ? AS email_status,
-                      ? AS global_tax_calculation, ? AS sales_term_ref,
-                      ? AS customer_memo, ? AS allow_ipn_payment,
-                      ? AS allow_online_payment, ? AS allow_online_credit_card_payment,
-                      ? AS allow_online_ach_payment, ? AS creado_en,
-                      ? AS actualizado_en) AS origen
-        ON destino.id = origen.id
-        WHEN MATCHED THEN UPDATE SET
-            sync_token = origen.sync_token, balance = origen.balance,
-            home_balance = origen.home_balance, print_status = origen.print_status,
-            email_status = origen.email_status, actualizado_en = origen.actualizado_en
-        WHEN NOT MATCHED THEN INSERT
-            (id, empresa_id, qbo_id, sync_token, doc_number, txn_date, due_date,
-             qbo_create_time, qbo_last_updated_time, qbo_customer_id, customer_name,
-             bill_email, free_form_address, currency, exchange_rate, total_amt,
-             home_total_amt, balance, home_balance, print_status, email_status,
-             global_tax_calculation, sales_term_ref, customer_memo, allow_ipn_payment,
-             allow_online_payment, allow_online_credit_card_payment,
-             allow_online_ach_payment, creado_en, actualizado_en)
-            VALUES (origen.id, origen.empresa_id, origen.qbo_id, origen.sync_token,
-                    origen.doc_number, origen.txn_date, origen.due_date,
-                    origen.qbo_create_time, origen.qbo_last_updated_time,
-                    origen.qbo_customer_id, origen.customer_name, origen.bill_email,
-                    origen.free_form_address, origen.currency, origen.exchange_rate,
-                    origen.total_amt, origen.home_total_amt, origen.balance,
-                    origen.home_balance, origen.print_status, origen.email_status,
-                    origen.global_tax_calculation, origen.sales_term_ref,
-                    origen.customer_memo, origen.allow_ipn_payment,
-                    origen.allow_online_payment, origen.allow_online_credit_card_payment,
-                    origen.allow_online_ach_payment, origen.creado_en,
-                    origen.actualizado_en);
+    Carga por lotes usando tabla temporal + MERGE.
+    - Inserta todas las filas del lote en #tmp (rápido, fast_executemany).
+    - MERGE de #tmp -> tabla real: UPDATE si existe (por id), INSERT si no.
     """
-    for f in filas:
-        sql_cur.execute(sql, f)
+    if not filas:
+        print(f"  {tabla}: sin filas.")
+        return
 
+    cur = sql.cursor()
+    cur.fast_executemany = True
 
-def merge_lineas(sql_cur, filas):
-    sql = """
-        MERGE dbo.lineas_facturas_quickbooks AS destino
-        USING (SELECT ? AS id, ? AS factura_qbo_id, ? AS line_number,
-                      ? AS description, ? AS amount, ? AS detail_type,
-                      ? AS item_ref_value, ? AS item_ref_name, ? AS qty,
-                      ? AS unit_price, ? AS tax_code_ref_value, ? AS creado_en) AS origen
-        ON destino.id = origen.id
-        WHEN MATCHED THEN UPDATE SET
-            description = origen.description, amount = origen.amount,
-            qty = origen.qty, unit_price = origen.unit_price
-        WHEN NOT MATCHED THEN INSERT
-            (id, factura_qbo_id, line_number, description, amount, detail_type,
-             item_ref_value, item_ref_name, qty, unit_price, tax_code_ref_value, creado_en)
-            VALUES (origen.id, origen.factura_qbo_id, origen.line_number,
-                    origen.description, origen.amount, origen.detail_type,
-                    origen.item_ref_value, origen.item_ref_name, origen.qty,
-                    origen.unit_price, origen.tax_code_ref_value, origen.creado_en);
-    """
-    for f in filas:
-        sql_cur.execute(sql, f)
+    cols_list = ", ".join(columnas)
+    placeholders = ", ".join(["?"] * len(columnas))
+    set_clause = ", ".join([f"destino.{c} = origen.{c}" for c in update_cols])
+    insert_cols = ", ".join(columnas)
+    insert_vals = ", ".join([f"origen.{c}" for c in columnas])
+
+    total = 0
+    for lote in chunk(filas, LOTE):
+        # 1. Crear tabla temporal con misma estructura que la real
+        cur.execute(f"SELECT TOP 0 {cols_list} INTO #tmp FROM dbo.{tabla};")
+        # 2. Insertar el lote en la temporal (por lotes, rápido)
+        cur.executemany(
+            f"INSERT INTO #tmp ({cols_list}) VALUES ({placeholders});", lote
+        )
+        # 3. MERGE de la temporal a la tabla real
+        cur.execute(f"""
+            MERGE dbo.{tabla} AS destino
+            USING #tmp AS origen
+            ON destino.id = origen.id
+            WHEN MATCHED THEN UPDATE SET {set_clause}
+            WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals});
+        """)
+        # 4. Limpiar la temporal para el siguiente lote
+        cur.execute("DROP TABLE #tmp;")
+        sql.commit()
+        total += len(lote)
+        print(f"  {tabla}: {total}/{len(filas)}")
+
+    cur.close()
 
 
 def main():
@@ -125,46 +89,86 @@ def main():
 
     print("Conectando a SQL Server...")
     sql = pyodbc.connect(SQL_CONN_STR)
-    sql_cur = sql.cursor()
-    sql_cur.fast_executemany = False
 
-    cols_empresas = ["id", "nombre", "nombre_corto", "realm_id", "activa",
-                     "creado_en", "actualizado_en"]
-    cols_facturas = ["id", "empresa_id", "qbo_id", "sync_token", "doc_number",
-                     "txn_date", "due_date", "qbo_create_time", "qbo_last_updated_time",
-                     "qbo_customer_id", "customer_name", "bill_email", "free_form_address",
-                     "currency", "exchange_rate", "total_amt", "home_total_amt", "balance",
-                     "home_balance", "print_status", "email_status", "global_tax_calculation",
-                     "sales_term_ref", "customer_memo", "allow_ipn_payment",
-                     "allow_online_payment", "allow_online_credit_card_payment",
-                     "allow_online_ach_payment", "creado_en", "actualizado_en"]
-    cols_lineas = ["id", "factura_qbo_id", "line_number", "description", "amount",
-                   "detail_type", "item_ref_value", "item_ref_name", "qty", "unit_price",
-                   "tax_code_ref_value", "creado_en"]
+    # ── Definición de columnas ──
+    cols_empresas = [
+        "id",
+        "nombre",
+        "nombre_corto",
+        "realm_id",
+        "activa",
+        "creado_en",
+        "actualizado_en",
+    ]
+    cols_facturas = [
+        "id",
+        "empresa_id",
+        "qbo_id",
+        "sync_token",
+        "doc_number",
+        "txn_date",
+        "due_date",
+        "qbo_create_time",
+        "qbo_last_updated_time",
+        "qbo_customer_id",
+        "customer_name",
+        "bill_email",
+        "free_form_address",
+        "currency",
+        "exchange_rate",
+        "total_amt",
+        "home_total_amt",
+        "balance",
+        "home_balance",
+        "print_status",
+        "email_status",
+        "global_tax_calculation",
+        "sales_term_ref",
+        "customer_memo",
+        "allow_ipn_payment",
+        "allow_online_payment",
+        "allow_online_credit_card_payment",
+        "allow_online_ach_payment",
+        "creado_en",
+        "actualizado_en",
+    ]
+    cols_lineas = [
+        "id",
+        "factura_qbo_id",
+        "line_number",
+        "description",
+        "amount",
+        "detail_type",
+        "item_ref_value",
+        "item_ref_name",
+        "qty",
+        "unit_price",
+        "tax_code_ref_value",
+        "creado_en",
+    ]
 
-    print("Leyendo empresas...")
+    # Al actualizar, refrescamos TODOS los campos menos el id (la llave).
+    upd_empresas = [c for c in cols_empresas if c != "id"]
+    upd_facturas = [c for c in cols_facturas if c != "id"]
+    upd_lineas = [c for c in cols_lineas if c != "id"]
+
+    # ── Sincronizar en orden (respeta llaves foráneas) ──
+    print("Leyendo empresas de PostgreSQL...")
     empresas = leer_pg(pg_cur, "empresas", cols_empresas)
-    merge_empresas(sql_cur, empresas)
-    sql.commit()
-    print(f"  {len(empresas)} empresas sincronizadas.")
+    sincronizar(sql, "empresas", cols_empresas, empresas, upd_empresas)
 
-    print("Leyendo facturas...")
+    print("Leyendo facturas de PostgreSQL...")
     facturas = leer_pg(pg_cur, "facturas_quickbooks", cols_facturas)
-    print(f"  {len(facturas)} facturas. Escribiendo en SQL Server...")
-    merge_facturas(sql_cur, facturas)
-    sql.commit()
-    print("  Facturas sincronizadas.")
+    sincronizar(sql, "facturas_quickbooks", cols_facturas, facturas, upd_facturas)
 
-    print("Leyendo lineas...")
+    print("Leyendo lineas de PostgreSQL...")
     lineas = leer_pg(pg_cur, "lineas_facturas_quickbooks", cols_lineas)
-    print(f"  {len(lineas)} lineas. Escribiendo en SQL Server...")
-    merge_lineas(sql_cur, lineas)
-    sql.commit()
-    print("  Lineas sincronizadas.")
+    sincronizar(sql, "lineas_facturas_quickbooks", cols_lineas, lineas, upd_lineas)
 
-    pg_cur.close(); pg.close()
-    sql_cur.close(); sql.close()
-    print("Sincronizacion completa.")
+    pg_cur.close()
+    pg.close()
+    sql.close()
+    print("\nSincronizacion completa.")
 
 
 if __name__ == "__main__":
