@@ -39,7 +39,7 @@ GRIS_FONDO = (248, 249, 250)
 
 # Tope FIJO de caracteres para la descripcion. La celda es mas ancha que en
 # operaciones (no hay columna HORAS), asi que admite mas texto.
-MAX_CHARS_DESCRIPCION = 121
+MAX_CHARS_DESCRIPCION = 120
 
 ABREVIATURAS_EMPRESA = [
     ("hardware", "H&N"),
