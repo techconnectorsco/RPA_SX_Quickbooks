@@ -119,6 +119,12 @@ def concatenar_descripcion(lineas: List[Dict], descripcion_factura: str = "") ->
 
     texto = "; ".join(partes) if partes else (descripcion_factura or "-")
 
+    # A minuscula y primera letra mayuscula. capitalize() no sirve porque bajaria
+    # tambien lo que sigue a cada ';'; con esto solo cambia el caso, no el texto.
+    if texto and texto != "-":
+        texto = texto.lower()
+        texto = texto[0].upper() + texto[1:]
+
     if len(texto) > MAX_CHARS_DESCRIPCION:
         texto = texto[: MAX_CHARS_DESCRIPCION - 3].rstrip() + "..."
     return _limpiar_latin1(texto)
