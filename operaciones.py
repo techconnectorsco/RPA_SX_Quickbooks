@@ -58,6 +58,8 @@ from supabase_manager import (
     ID_RPA_OPERACIONES,
 )
 from teams_notifier import enviar_tarjeta_ejecucion, enviar_tarjeta_simple
+from correo_reporte_facturacion import enviar_reporte_por_correo
+import correos_config as config_correos
 import simulacion
 from teams_resumen import resumen_operaciones
 
@@ -1109,6 +1111,18 @@ def main():
                 if tc_venta:
                     status_global_ejecution["facturas_con_cambio_moneda"] += 1
 
+                # --- Metricas POR EMPRESA (para el desglose del correo) ---
+                _pe = status_global_ejecution.setdefault("por_empresa", {})
+                _reg = _pe.setdefault(
+                    cliente_lbl or "Sin empresa",
+                    {"ok": 0, "error": 0, "crc": 0.0, "usd": 0.0},
+                )
+                _reg["ok"] += 1
+                if moneda_emitida == "CRC":
+                    _reg["crc"] += _total
+                else:
+                    _reg["usd"] += _total
+
                 # 3. ÉXITO: Registramos la operación (con moneda y tipo de cambio)
                 reporte.registrar_operacion(
                     op_id=oid,
@@ -1133,6 +1147,11 @@ def main():
                     marcar_error(conn, oid, e)
                 status_global_ejecution["con_error"] += 1
                 clasificar_error_metricas(str(e))
+                # Error por empresa (para el desglose del correo)
+                status_global_ejecution.setdefault("por_empresa", {}).setdefault(
+                    cliente_lbl or "Sin empresa",
+                    {"ok": 0, "error": 0, "crc": 0.0, "usd": 0.0},
+                )["error"] += 1
 
                 # 4. Error dinámico en el proceso de envío (ESTÁ PERFECTO)
                 # NOTA: Pasamos lineas=[] para que en errores muestre 0.00 en montos, lo cual es correcto.
@@ -1243,6 +1262,20 @@ def main():
         )
     except Exception as e_teams:
         print(f"[aviso] No se pudo notificar a Teams: {e_teams}")
+
+    # ── Correo de reporte (con el PDF adjunto) ──
+    # Va SIEMPRE que hubo trabajo, en try/except propio: si el correo falla, no
+    # afecta la facturacion (que ya termino) ni la notificacion de Teams.
+    try:
+        enviar_reporte_por_correo(
+            status_global_ejecution,
+            titulo="RPA Facturacion - Operaciones",
+            ruta_pdf=ruta_pdf,
+            to_email=config_correos.DESTINATARIOS_OPERACIONES,
+            cc_email=config_correos.CC_OPERACIONES,
+        )
+    except Exception as e_correo:
+        print(f"[aviso] No se pudo enviar el correo: {e_correo}")
 
 
 if __name__ == "__main__":

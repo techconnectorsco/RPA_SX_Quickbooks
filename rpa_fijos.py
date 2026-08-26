@@ -45,6 +45,8 @@ from supabase_manager import (
     ID_RPA_FIJOS,
 )
 from teams_notifier import enviar_tarjeta_ejecucion, enviar_tarjeta_simple
+from correo_reporte_facturacion import enviar_reporte_por_correo
+import correos_config as config_correos
 import simulacion
 from teams_resumen import resumen_contratos_fijos
 
@@ -1119,6 +1121,20 @@ def main():
                 if tc_venta:
                     status_global_ejecution["facturas_con_cambio_moneda"] += 1
 
+                # --- Metricas POR EMPRESA (para el desglose del correo) ---
+                # Cantidad y monto por moneda de cada empresa facturadora, sin
+                # tocar los totales globales de arriba.
+                _pe = status_global_ejecution.setdefault("por_empresa", {})
+                _reg = _pe.setdefault(
+                    cliente_lbl or "Sin empresa",
+                    {"ok": 0, "error": 0, "crc": 0.0, "usd": 0.0},
+                )
+                _reg["ok"] += 1
+                if moneda_emitida == "CRC":
+                    _reg["crc"] += _total
+                else:
+                    _reg["usd"] += _total
+
                 reporte.registrar_emision(
                     compania=cliente_lbl,
                     cliente=cliente_nom,
@@ -1139,6 +1155,11 @@ def main():
                     marcar_error(conn, eid, e)
                 status_global_ejecution["con_error"] += 1
                 clasificar_error_metricas(str(e))
+                # Error por empresa (para el desglose del correo)
+                status_global_ejecution.setdefault("por_empresa", {}).setdefault(
+                    cliente_lbl or "Sin empresa",
+                    {"ok": 0, "error": 0, "crc": 0.0, "usd": 0.0},
+                )["error"] += 1
                 reporte.registrar_emision(
                     compania=cliente_lbl,
                     cliente=cliente_nom,
@@ -1225,6 +1246,10 @@ def main():
             )
         except Exception as e_teams:
             print(f"[aviso] No se pudo notificar a Teams: {e_teams}")
+        # Nota: los dias sin emisiones NO se manda correo (solo la tarjeta de
+        # Teams de arriba, como latido). Un correo diario "no hubo nada" llenaria
+        # la bandeja de la encargada sin aportar. Si se quisiera, aca iria un
+        # enviar_reporte_por_correo(...) con ruta_pdf=None.
         return
 
     try:
@@ -1240,6 +1265,20 @@ def main():
         )
     except Exception as e_teams:
         print(f"[aviso] No se pudo notificar a Teams: {e_teams}")
+
+    # ── Correo de reporte (con el PDF adjunto) ──
+    # Va SIEMPRE que hubo trabajo, en try/except propio: si el correo falla, no
+    # afecta la facturacion (que ya termino) ni la notificacion de Teams.
+    try:
+        enviar_reporte_por_correo(
+            status_global_ejecution,
+            titulo="RPA Facturacion - Contratos Fijos",
+            ruta_pdf=ruta_pdf,
+            to_email=config_correos.DESTINATARIOS_FIJOS,
+            cc_email=config_correos.CC_FIJOS,
+        )
+    except Exception as e_correo:
+        print(f"[aviso] No se pudo enviar el correo: {e_correo}")
 
 
 if __name__ == "__main__":
