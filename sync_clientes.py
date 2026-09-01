@@ -87,25 +87,43 @@ def refrescar_token(realm):
 
 
 def descargar_clientes(realm, token):
-    """Baja TODOS los clientes de una empresa (solo lectura, paginado)."""
-    clientes, inicio, lote = [], 1, 100
+    """Baja TODOS los clientes de una empresa (solo lectura, paginado, con reintentos)."""
+    clientes, inicio, lote = [], 1, 50  # Lote reducido a 50 para evitar 503 timeouts
     while True:
         sql = f"SELECT * FROM Customer STARTPOSITION {inicio} MAXRESULTS {lote}"
         url = f"{PROD_BASE_URL}/v3/company/{realm}/query?query={requests.utils.quote(sql)}"
-        resp = requests.get(
-            url,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            print(f"  [ERROR {resp.status_code}] {resp.text[:200]}")
+
+        exito = False
+        lote_res = []
+        for intento in range(3):  # Hasta 3 reintentos por lote
+            try:
+                resp = requests.get(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    },
+                    timeout=60,  # Timeout extendido a 60 segundos
+                )
+                if resp.status_code != 200:
+                    print(f"  [ERROR {resp.status_code}] {resp.text[:200]}")
+                    break
+
+                lote_res = resp.json().get("QueryResponse", {}).get("Customer", [])
+                clientes.extend(lote_res)
+                exito = True
+                break  # Salir del bucle de reintentos si fue exitoso
+
+            except requests.exceptions.ReadTimeout:
+                print(f"  [Aviso] Timeout en lote. Reintentando ({intento+1}/3)...")
+                time.sleep(2)
+            except requests.exceptions.RequestException as e:
+                print(f"  [ERROR de Red] {e}")
+                break
+
+        if not exito or len(lote_res) < lote:
             break
-        lote_res = resp.json().get("QueryResponse", {}).get("Customer", [])
-        if not lote_res:
-            break
-        clientes.extend(lote_res)
-        if len(lote_res) < lote:
-            break
+
         inicio += lote
     return clientes
 

@@ -43,7 +43,7 @@ CLIENT_SECRET = os.getenv("QBO_CLIENT_SECRET")
 #         Sirve para verificar que el encargado de QuickBooks ya cargo los
 #         servicios nuevos ANTES de escribir nada en la tabla `servicios`.
 # False = ademas de mostrar, guarda/actualiza en la tabla `servicios`.
-SOLO_CONSULTA = True
+SOLO_CONSULTA = False
 
 EMPRESAS = [
     {
