@@ -678,6 +678,19 @@ def construir_factura(op, lineas, realm, token, tc_venta, correo_cliente=None):
         de ahi sale el impuesto que eligio el operador en la webapp."""
         nonlocal total_tax
 
+        # Linea informativa (DescriptionOnly): una nota para el cliente, sin
+        # servicio y sin nada que cobrar (horas/total en 0 o NULL). Va como texto
+        # en la factura; Hacienda la acepta asi. Si se armara como linea de cobro
+        # con Qty 0, Mondragon la rechaza por "falta cantidad en linea".
+        _total = linea.get("total_linea") if isinstance(linea, dict) else None
+        _sin_servicio = not servicio
+        _sin_monto = (qty is None or float(qty) == 0) and (
+            _total is None or float(_total) == 0
+        )
+        if _sin_servicio and _sin_monto:
+            lineas_qbo.append({"DetailType": "DescriptionOnly", "Description": desc})
+            return
+
         code, rate_id, pct = resolver_impuesto(linea, realm, token)
         if code not in ("NON", "TAX"):
             codigos_gravados.add(code)

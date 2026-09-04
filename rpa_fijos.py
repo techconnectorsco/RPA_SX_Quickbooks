@@ -719,8 +719,22 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
 
     if tipo == "facturar_completo":
         for ln in lineas:
-            # 1. Detectar si es línea DescriptionOnly (sin servicio y sin cantidad)
-            if not ln.get("servicio") and ln.get("cantidad") is None:
+            # 1. Linea informativa (DescriptionOnly): es una nota para el cliente,
+            #    sin servicio y sin nada que cobrar. Va como texto en la factura;
+            #    QuickBooks y Hacienda/Mondragon la aceptan asi.
+            #    Se detecta por: SIN servicio Y sin monto (cantidad Y total en 0
+            #    o NULL). Se contemplan las dos formas a proposito: la webapp
+            #    deberia guardar NULL cuando el usuario no elige item/cantidad,
+            #    pero si por error quedo un 0 tambien se toma como nota. Antes la
+            #    condicion exigia cantidad IS None y por eso una nota con 0 se
+            #    armaba como linea de cobro con Qty 0, que Hacienda rechaza.
+            _qty = ln.get("cantidad")
+            _total = ln.get("total_linea")
+            _sin_servicio = not ln.get("servicio")
+            _sin_monto = (_qty is None or float(_qty) == 0) and (
+                _total is None or float(_total) == 0
+            )
+            if _sin_servicio and _sin_monto:
                 lineas_qbo.append(
                     {"DetailType": "DescriptionOnly", "Description": ln["descripcion"]}
                 )
