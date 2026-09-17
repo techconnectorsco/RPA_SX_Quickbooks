@@ -1037,6 +1037,18 @@ def main():
                     error_msg="Empresa sin realm_id",
                     descripcion_factura=desc_fact,
                 )
+
+                # --- Detalle para la tabla del correo (vista rapida) ---
+                status_global_ejecution.setdefault("detalle_facturas", []).append(
+                    {
+                        "empresa": cliente_lbl,
+                        "cliente": cliente_nom,
+                        "factura_num": "-",
+                        "descripcion": desc_fact,
+                        "estado": "ERR",
+                    }
+                )
+
                 print(f"  [SKIP] {cliente_lbl}: empresa sin realm")
                 continue
             if ENTORNO == "sandbox" and realm in REALMS_PRODUCCION:
@@ -1058,6 +1070,18 @@ def main():
                     error_msg="Sin qbo_customer_id",
                     descripcion_factura=desc_fact,
                 )
+
+                # --- Detalle para la tabla del correo (vista rapida) ---
+                status_global_ejecution.setdefault("detalle_facturas", []).append(
+                    {
+                        "empresa": cliente_lbl,
+                        "cliente": cliente_nom,
+                        "factura_num": "-",
+                        "descripcion": desc_fact,
+                        "estado": "ERR",
+                    }
+                )
+
                 print(f"  [SKIP] {cliente_lbl}: sin qbo_customer_id")
                 continue
 
@@ -1161,6 +1185,18 @@ def main():
                     tipo_cambio_usado=tc_venta,
                     total_qb=inv.get("TotalAmt"),
                 )
+
+                # --- Detalle para la tabla del correo (vista rapida) ---
+                status_global_ejecution.setdefault("detalle_facturas", []).append(
+                    {
+                        "empresa": cliente_lbl,
+                        "cliente": cliente_nom,
+                        "factura_num": inv.get("DocNumber", "-"),
+                        "descripcion": desc_fact,
+                        "estado": "OK",
+                    }
+                )
+
                 print(
                     f"  [OK]   {cliente_lbl} ({tipo}): factura {inv.get('DocNumber')} total {inv.get('TotalAmt')}"
                 )
@@ -1184,6 +1220,18 @@ def main():
                     error_msg=str(e),
                     descripcion_factura=desc_fact,
                 )
+
+                # --- Detalle para la tabla del correo (vista rapida) ---
+                status_global_ejecution.setdefault("detalle_facturas", []).append(
+                    {
+                        "empresa": cliente_lbl,
+                        "cliente": cliente_nom,
+                        "factura_num": "-",
+                        "descripcion": desc_fact,
+                        "estado": "ERR",
+                    }
+                )
+
                 print(f"  [ERR]  {cliente_lbl}: {e}")
     finally:
         conn.close()

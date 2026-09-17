@@ -19,6 +19,7 @@ Uso desde el RPA:
 """
 
 from datetime import datetime
+from html import escape as _esc
 
 from correo_facturacion import EmailSenderFacturacion
 
@@ -27,6 +28,13 @@ AZUL = "#0078D7"
 VERDE = "#16a34a"
 ROJO = "#dc2626"
 AMBAR = "#f59e0b"
+
+# ── Limites de truncado para la tabla de detalle (visual rapida) ─────────────
+# Definidos con Irving:
+#   - Descripcion  : 35 chars
+#   - Cliente      : 22 chars (para que la fila no crezca a lo ancho)
+MAX_DESCRIPCION = 35
+MAX_CLIENTE = 22
 
 
 def _fila(etiqueta, valor, alt=False, acento=None):
@@ -38,6 +46,114 @@ def _fila(etiqueta, valor, alt=False, acento=None):
         f'<td style="padding: 8px;">{etiqueta}</td>'
         f'<td style="padding: 8px;"><strong>{valor}</strong></td></tr>'
     )
+
+
+def _truncar(texto, n):
+    """Recorta a n caracteres agregando '…' si se paso. Nunca revienta con None."""
+    if texto is None:
+        return "-"
+    s = str(texto).strip()
+    if not s:
+        return "-"
+    if len(s) <= n:
+        return s
+    # -1 para dejar espacio al ellipsis y no exceder n visualmente.
+    return s[: n - 1] + "…"
+
+
+def _abreviar_empresa(nombre):
+    """Empresa facturadora a etiqueta corta (SX / H&N / LC).
+
+    El nombre entra como viene en la base (compania_facturadora): puede ser
+    'Soportexperto.com S.A.', 'Hardware y Network S.A.', 'Laitcorp', etc. Se
+    matchea por substring, en minusculas, para no depender de mayusculas ni de
+    puntuacion. Si no matchea nada conocido, se devuelve truncado a 6 chars
+    para que la columna no se ensanche (mejor eso que romper el layout).
+    """
+    if not nombre:
+        return "-"
+    n = str(nombre).strip().lower()
+    if "soporte" in n or n.startswith("sx"):
+        return "SX"
+    if "hardware" in n or "network" in n or "h&n" in n or "h y n" in n:
+        return "H&N"
+    if "lait" in n or n.startswith("lc"):
+        return "LC"
+    # Desconocida: mostrar corta para no romper la columna angosta.
+    return _truncar(nombre, 6)
+
+
+def _tabla_detalle_facturas(status):
+    """Tabla compacta con una fila por factura procesada (OK y ERR mezcladas).
+
+    Espera status["detalle_facturas"] como lista de dicts con las llaves:
+        empresa, cliente, factura_num, descripcion, estado ("OK" | "ERR")
+
+    Si no hay detalle o la lista viene vacia, devuelve string vacio y no se
+    renderiza la seccion (el correo queda como antes).
+    """
+    detalle = status.get("detalle_facturas") or []
+    if not detalle:
+        return ""
+
+    filas = ""
+    for i, d in enumerate(detalle):
+        estado = str(d.get("estado", "")).upper()
+        es_ok = estado == "OK"
+
+        # Fondo alternado + barra de acento por estado (rojo si fue error).
+        # El rojo del borde izquierdo hace que las filas con error salten a la
+        # vista aunque el correo se lea rapido.
+        fondo = "background-color: #f9f9f9;" if i % 2 == 0 else ""
+        borde = "" if es_ok else f"border-left: 3px solid {ROJO};"
+
+        color_estado = VERDE if es_ok else ROJO
+        icono = "✓" if es_ok else "✗"
+
+        empresa = _esc(_abreviar_empresa(d.get("empresa")))
+        cliente = _esc(_truncar(d.get("cliente"), MAX_CLIENTE))
+        factura = _esc(str(d.get("factura_num") or "-"))
+        descripcion = _esc(_truncar(d.get("descripcion"), MAX_DESCRIPCION))
+
+        filas += (
+            f'<tr style="{fondo}{borde}">'
+            f'<td style="padding: 6px 8px; white-space: nowrap;">{empresa}</td>'
+            f'<td style="padding: 6px 8px;">{cliente}</td>'
+            f'<td style="padding: 6px 8px; white-space: nowrap; font-family: monospace;">{factura}</td>'
+            f'<td style="padding: 6px 8px;">{descripcion}</td>'
+            f'<td style="padding: 6px 8px; text-align:center; color:{color_estado}; font-weight:bold; font-size:16px;">{icono}</td>'
+            f"</tr>"
+        )
+
+    # Anchos fijos en las columnas cortas para que el layout sea estable.
+    # Cliente y Descripcion son las unicas que ceden ancho.
+    return f"""
+        <h3 style="color:#333; font-size:15px; margin:28px 0 8px;">Detalle de facturas ({len(detalle)})</h3>
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed;">
+            <colgroup>
+                <col style="width: 60px;">
+                <col>
+                <col style="width: 90px;">
+                <col>
+                <col style="width: 50px;">
+            </colgroup>
+            <thead>
+                <tr style="background-color: {AZUL}; color: white;">
+                    <th style="padding: 8px; text-align: left;">Empresa</th>
+                    <th style="padding: 8px; text-align: left;">Cliente</th>
+                    <th style="padding: 8px; text-align: left;"># Factura</th>
+                    <th style="padding: 8px; text-align: left;">Descripción</th>
+                    <th style="padding: 8px; text-align: center;">Estado</th>
+                </tr>
+            </thead>
+            <tbody>
+                {filas}
+            </tbody>
+        </table>
+        <p style="font-size: 11px; color: #888; margin: 4px 0 0;">
+            Vista rapida. Los datos completos (montos, moneda, lineas, mensajes de error) van en el PDF adjunto.
+        </p>
+    """
 
 
 def construir_html(status, titulo):
@@ -143,6 +259,9 @@ def construir_html(status, titulo):
             </table>
         """
 
+    # ── NUEVO: Tabla compacta con una fila por factura procesada ──
+    tabla_detalle = _tabla_detalle_facturas(status)
+
     html = f"""
     <html>
     <body style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #f3f4f6; margin: 0; padding: 30px;">
@@ -173,6 +292,8 @@ def construir_html(status, titulo):
             </table>
 
             {tabla_empresas}
+
+            {tabla_detalle}
 
             {filas_err}
 
@@ -239,6 +360,65 @@ if __name__ == "__main__":
         "monto_total_usd": 341.40,
         "err_sin_cliente": 1,
         "err_iva_invalido": 1,
+        "por_empresa": {
+            "Soportexperto.com S.A.": {
+                "ok": 3,
+                "error": 1,
+                "crc": 780_000.00,
+                "usd": 120.50,
+            },
+            "Hardware y Network S.A.": {
+                "ok": 2,
+                "error": 0,
+                "crc": 566_492.64,
+                "usd": 0,
+            },
+            "Laitcorp": {"ok": 1, "error": 1, "crc": 0, "usd": 220.90},
+        },
+        "detalle_facturas": [
+            {
+                "empresa": "Soportexperto.com S.A.",
+                "cliente": "Constructora Los Robles S.A.",
+                "factura_num": "75623437",
+                "descripcion": "Servicio mensual soporte tecnico noviembre 2025",
+                "estado": "OK",
+            },
+            {
+                "empresa": "Soportexperto.com S.A.",
+                "cliente": "Bufete Vargas & Asociados",
+                "factura_num": "75623438",
+                "descripcion": "Mantenimiento preventivo servidores",
+                "estado": "OK",
+            },
+            {
+                "empresa": "Hardware y Network S.A.",
+                "cliente": "Colegio San Agustin",
+                "factura_num": "75623439",
+                "descripcion": "Licenciamiento Microsoft 365 - 45 usuarios",
+                "estado": "OK",
+            },
+            {
+                "empresa": "Laitcorp",
+                "cliente": "Ferreteria El Martillo",
+                "factura_num": "-",
+                "descripcion": "Renta equipos noviembre",
+                "estado": "ERR",
+            },
+            {
+                "empresa": "Hardware y Network S.A.",
+                "cliente": "Farmacia La Bendicion",
+                "factura_num": "75623440",
+                "descripcion": "Soporte tecnico + antivirus corporativo",
+                "estado": "OK",
+            },
+            {
+                "empresa": "Soportexperto.com S.A.",
+                "cliente": "Distribuidora Central",
+                "factura_num": "-",
+                "descripcion": "Servicio mensual",
+                "estado": "ERR",
+            },
+        ],
     }
     html = construir_html(ejemplo, "RPA Facturacion - Contratos Fijos")
     with open("preview_correo.html", "w", encoding="utf-8") as f:

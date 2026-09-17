@@ -128,11 +128,22 @@ def descargar_clientes(realm, token):
     return clientes
 
 
+def limpiar_email(valor):
+    """Normaliza el correo de QBO: quita espacios sobrantes en cada
+    direccion y alrededor de las comas. QuickBooks rechaza (RFC 822)
+    correos con espacios, asi que garantizamos formato limpio en la base."""
+    if not valor:
+        return valor
+    partes = [p.strip() for p in valor.split(",")]
+    partes = [p for p in partes if p]  # descarta vacios
+    return ",".join(partes)
+
+
 def guardar(conn, empresa_id, clientes):
     """UPSERT de los clientes en la tabla espejo (incluyendo qbo_moneda)."""
     filas = []
     for c in clientes:
-        email = (c.get("PrimaryEmailAddr") or {}).get("Address")
+        email = limpiar_email((c.get("PrimaryEmailAddr") or {}).get("Address"))
         # Extraer moneda desde CurrencyRef (ej. 'CRC', 'USD')
         moneda = (c.get("CurrencyRef") or {}).get("value") or "CRC"
 

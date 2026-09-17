@@ -1008,6 +1008,18 @@ def main():
                         "descripcion_factura", "-"
                     ),  # <--- Agregado aquí
                 )
+
+                # --- Detalle para la tabla del correo (vista rapida) ---
+                status_global_ejecution.setdefault("detalle_facturas", []).append(
+                    {
+                        "empresa": cliente_lbl,
+                        "cliente": cliente_nom,
+                        "factura_num": "-",
+                        "descripcion": op.get("descripcion_factura", "-"),
+                        "estado": "ERR",
+                    }
+                )
+
                 print(f"  [SKIP] {oid}: empresa sin realm")
                 continue
 
@@ -1037,6 +1049,18 @@ def main():
                         "descripcion_factura", "-"
                     ),  # <--- Agregado aquí
                 )
+
+                # --- Detalle para la tabla del correo (vista rapida) ---
+                status_global_ejecution.setdefault("detalle_facturas", []).append(
+                    {
+                        "empresa": cliente_lbl,
+                        "cliente": cliente_nom,
+                        "factura_num": "-",
+                        "descripcion": op.get("descripcion_factura", "-"),
+                        "estado": "ERR",
+                    }
+                )
+
                 print(f"  [SKIP] {oid}: sin qbo_customer_id")
                 continue
 
@@ -1149,6 +1173,18 @@ def main():
                     tipo_cambio_usado=tc_venta,
                     total_qb=inv.get("TotalAmt"),
                 )
+
+                # --- Detalle para la tabla del correo (vista rapida) ---
+                status_global_ejecution.setdefault("detalle_facturas", []).append(
+                    {
+                        "empresa": cliente_lbl,
+                        "cliente": cliente_nom,
+                        "factura_num": inv.get("DocNumber", "-"),
+                        "descripcion": op.get("descripcion_factura", "-"),
+                        "estado": "OK",
+                    }
+                )
+
                 tc_txt = f" TC {tc_venta}" if tc_venta else ""
                 print(
                     f"  [OK]   {oid}: factura {inv.get('DocNumber')} "
@@ -1178,6 +1214,18 @@ def main():
                     error_msg=str(e),
                     descripcion_factura=op.get("descripcion_factura", "-"),
                 )
+
+                # --- Detalle para la tabla del correo (vista rapida) ---
+                status_global_ejecution.setdefault("detalle_facturas", []).append(
+                    {
+                        "empresa": cliente_lbl,
+                        "cliente": cliente_nom,
+                        "factura_num": "-",
+                        "descripcion": op.get("descripcion_factura", "-"),
+                        "estado": "ERR",
+                    }
+                )
+
                 print(f"  [ERR]  {oid}: {e}")
 
     except Exception as e_db:
