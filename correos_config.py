@@ -15,14 +15,14 @@ ESTADO ACTUAL: fase de verificacion.
 # agregar aca el correo de la dueña, asi:
 #     DESTINATARIOS = ["devs@techconnectors.co", "correo-de-la-duena@..."]
 # o reemplazar por el de ella si ya no se quiere la copia de verificacion.
-DESTINATARIOS = [
-    "devs@techconnectors.co",
-]
+DESTINATARIOS = ["devs@techconnectors.co", "lucia.vargas@soportexperto.com"]
 
 # ── Copia (CC) ───────────────────────────────────────────────────────────────
 # Lista de correos en copia. Lista vacia [] = sin copia.
 CC = [
     "omar.hernandez@soportexperto.com",
+    "k.lindo@soportexperto.com",
+    "lrivera@soportexperto.com",
 ]
 
 # ── Por si algun dia fijos y operaciones deben ir a listas distintas ──────────
