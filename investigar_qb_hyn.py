@@ -116,7 +116,7 @@ def investigar_facturas(token):
         txn_date = fac.get("TxnDate", "?")
         total = fac.get("TotalAmt", 0)
 
-        print(f"  ────────────────────────────────────────────────")
+        print(f"  ------------------------------------------------")
         print(f"  Invoice Id: {inv_id}   DocNumber: {docnum}")
         print(f"  Fecha: {txn_date}   Total: {total}")
         print(f"  Cliente: {cliente}")
