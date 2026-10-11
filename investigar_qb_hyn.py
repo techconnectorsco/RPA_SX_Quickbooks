@@ -140,7 +140,7 @@ def investigar_facturas(token):
                         )
                 print(f"     [Def {defid}] '{nombre}' = '{valor}'{marca}")
 
-    print("\n  ─── RESUMEN ───")
+    print("\n  ----- RESUMEN --------------------------------")
     if posibles_campos_cotizacion:
         print(
             "  Campos que aparecen con valores tipo COT/QUO/ORD (posibles 'Cotizacion'):"
