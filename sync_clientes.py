@@ -142,10 +142,21 @@ def limpiar_email(valor):
 def guardar(conn, empresa_id, clientes):
     """UPSERT de los clientes en la tabla espejo (incluyendo qbo_moneda)."""
     filas = []
+    con_termino = 0
     for c in clientes:
         email = limpiar_email((c.get("PrimaryEmailAddr") or {}).get("Address"))
         # Extraer moneda desde CurrencyRef (ej. 'CRC', 'USD')
         moneda = (c.get("CurrencyRef") or {}).get("value") or "CRC"
+
+        # Termino / condicion de pago del cliente (SalesTermRef). Un cliente
+        # tiene UN solo termino por defecto (o ninguno). QBO NO lo hereda a la
+        # factura al crear por API, por eso lo espejamos aca: el RPA lo mandara
+        # para que la Fecha de vencimiento salga correcta.
+        term_ref = c.get("SalesTermRef") or {}
+        sales_term_id = term_ref.get("value")  # None si el cliente no tiene termino
+        sales_term_name = term_ref.get("name")
+        if sales_term_id:
+            con_termino += 1
 
         filas.append(
             (
@@ -156,25 +167,39 @@ def guardar(conn, empresa_id, clientes):
                 email,
                 moneda,
                 bool(c.get("Active", True)),
+                sales_term_id,
+                sales_term_name,
             )
         )
     if not filas:
         return 0
 
+    print(
+        f"  Terminos: {con_termino} con termino / {len(filas) - con_termino} sin termino"
+    )
+
     sql = """
         INSERT INTO clientes_quickbooks
-            (empresa_id, qbo_customer_id, display_name, company_name, email, qbo_moneda, activo, sincronizado_en)
+            (empresa_id, qbo_customer_id, display_name, company_name, email, qbo_moneda, activo,
+             qbo_sales_term_id, qbo_sales_term_name, sincronizado_en)
         VALUES %s
         ON CONFLICT (empresa_id, qbo_customer_id) DO UPDATE SET
-            display_name    = EXCLUDED.display_name,
-            company_name    = EXCLUDED.company_name,
-            email           = EXCLUDED.email,
-            qbo_moneda      = EXCLUDED.qbo_moneda,
-            activo          = EXCLUDED.activo,
-            sincronizado_en = now();
+            display_name        = EXCLUDED.display_name,
+            company_name        = EXCLUDED.company_name,
+            email               = EXCLUDED.email,
+            qbo_moneda          = EXCLUDED.qbo_moneda,
+            activo              = EXCLUDED.activo,
+            qbo_sales_term_id   = EXCLUDED.qbo_sales_term_id,
+            qbo_sales_term_name = EXCLUDED.qbo_sales_term_name,
+            sincronizado_en     = now();
     """
     cur = conn.cursor()
-    execute_values(cur, sql, filas, template="(%s, %s, %s, %s, %s, %s, %s, now())")
+    execute_values(
+        cur,
+        sql,
+        filas,
+        template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, now())",
+    )
     conn.commit()
     return len(filas)
 
