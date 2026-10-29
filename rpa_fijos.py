@@ -247,7 +247,9 @@ def leer_emisiones_listas(conn, periodo):
                 c.dia_emision,
                 c.descripcion_factura AS contrato_descripcion,
                 e.realm_id,
-                cq.email             AS cliente_email
+                cq.email               AS cliente_email,
+                cq.qbo_sales_term_id   AS cliente_sales_term_id,
+                cq.qbo_sales_term_name AS cliente_sales_term_name
             FROM emisiones_cronograma em
             JOIN contratos_cronograma c ON c.id = em.contrato_id
             LEFT JOIN empresas e ON e.nombre = c.compania_facturadora
@@ -667,7 +669,16 @@ def moneda_factura(moneda_contrato, invertir):
     return "CRC" if base == "USD" else "USD"
 
 
-def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
+def construir_factura(
+    em,
+    lineas,
+    realm,
+    token,
+    tc_venta,
+    correo_cliente=None,
+    sales_term_id=None,
+    sales_term_name=None,
+):
     customer = CFG["cliente_fijo"] or em["qbo_customer_id"]
     if not customer:
         raise RuntimeError(
@@ -847,6 +858,29 @@ def construir_factura(em, lineas, realm, token, tc_venta, correo_cliente=None):
     # Sale de la tabla espejo clientes_quickbooks (la llena sync_clientes.py).
     if correo_cliente:
         factura["BillEmail"] = {"Address": correo_cliente}
+
+    # Termino / condicion de pago: QBO NO lo hereda del cliente al crear la
+    # factura por API (igual que el correo), asi que sin esto la Fecha de
+    # vencimiento sale mal. Sale del espejo clientes_quickbooks (qbo_sales_term_id,
+    # que llena sync_clientes.py desde SalesTermRef).
+    # OJO: el Id del termino es de PRODUCCION; en sandbox (empresa gringa) ese Id
+    # no existe, por eso solo se manda en produccion. En sandbox se imprime lo
+    # que habria mandado, para validar la logica sin que QBO rechace.
+    _cli_dbg = em.get("nombre_cliente", "?")
+    if sales_term_id:
+        if ENTORNO == "produccion":
+            factura["SalesTermRef"] = {"value": str(sales_term_id)}
+            print(
+                f"  [TERMINO] {_cli_dbg} -> SalesTermRef [{sales_term_id}] {sales_term_name or ''}"
+            )
+        else:
+            print(
+                f"  [TERMINO] (sandbox) {_cli_dbg} tiene [{sales_term_id}] {sales_term_name or ''}; no se manda en sandbox"
+            )
+    else:
+        print(
+            f"  [TERMINO] {_cli_dbg} -> SIN termino en QBO; la factura usara el default de la empresa"
+        )
 
     # Nota visible en la factura (para porcentaje / parcial)
     if nota_factura:
@@ -1113,6 +1147,8 @@ def main():
                     tokens[realm],
                     tc_venta,
                     correo_cliente=em.get("cliente_email"),
+                    sales_term_id=em.get("cliente_sales_term_id"),
+                    sales_term_name=em.get("cliente_sales_term_name"),
                 )
                 if SIMULACION:
                     # Corrida en frio: se verifica la factura pero NO se envia
