@@ -8,17 +8,18 @@ Solo refresca un token en memoria y hace 3 consultas de lectura.
 USO
 ---
   1) Usando el refresh_token que ya tenes en config/tokens_empresas.json:
-       py diag_qb.py 9130355360397996
+        py diag_qb.py 9130355360397996
 
   2) Usando un access_token fresco del OAuth Playground (dura ~1 hora):
-       py diag_qb.py 9130355360397996 --access-token eyJhb...
+        py diag_qb.py 9130355360397996 --access-token eyJhb...
 
   3) Pasando el refresh_token a mano:
-       py diag_qb.py 9130355360397996 --refresh-token AB11...
+        py diag_qb.py 9130355360397996 --refresh-token AB11...
 
 CREDENCIALES
 ------------
-Toma QB_CLIENT_ID / QB_CLIENT_SECRET del entorno o del .env del directorio.
+Toma QBO_CLIENT_ID / QBO_CLIENT_SECRET (o QB_CLIENT_ID / QB_CLIENT_SECRET)
+del entorno o del .env del directorio.
 (No hacen falta si usas --access-token.)
 """
 
@@ -193,11 +194,14 @@ def main():
                 sys.exit(1)
             linea(f"  refresh_token leido de {TOKENS_FILE} (archivo intacto).")
 
-        client_id = os.environ.get("QB_CLIENT_ID")
-        client_secret = os.environ.get("QB_CLIENT_SECRET")
+        client_id = os.environ.get("QBO_CLIENT_ID") or os.environ.get("QB_CLIENT_ID")
+        client_secret = os.environ.get("QBO_CLIENT_SECRET") or os.environ.get(
+            "QB_CLIENT_SECRET"
+        )
+
         if not client_id or not client_secret:
             linea(
-                "  [X] Faltan QB_CLIENT_ID / QB_CLIENT_SECRET en el entorno o el .env."
+                "  [X] Faltan QBO_CLIENT_ID / QBO_CLIENT_SECRET en el entorno o el .env."
             )
             sys.exit(1)
         linea(f"  client_id: {client_id[:12]}...")
