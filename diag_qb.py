@@ -22,7 +22,8 @@ USO
 
 CREDENCIALES
 ------------
-QB_CLIENT_ID / QB_CLIENT_SECRET del entorno o del .env del directorio.
+QBO_CLIENT_ID / QBO_CLIENT_SECRET (o QB_CLIENT_ID / QB_CLIENT_SECRET)
+del entorno o del .env del directorio.
 (No hacen falta si usas --access-token.)
 
 DONDE CORRERLO
@@ -342,11 +343,15 @@ def main():
             args._tokens = json.load(fh)
         linea(f"  Tokens leidos de {TOKENS_FILE} (archivo intacto).")
 
-        args._client_id = os.environ.get("QB_CLIENT_ID")
-        args._client_secret = os.environ.get("QB_CLIENT_SECRET")
+        args._client_id = os.environ.get("QBO_CLIENT_ID") or os.environ.get(
+            "QB_CLIENT_ID"
+        )
+        args._client_secret = os.environ.get("QBO_CLIENT_SECRET") or os.environ.get(
+            "QB_CLIENT_SECRET"
+        )
         if not args._client_id or not args._client_secret:
             linea(
-                "  [X] Faltan QB_CLIENT_ID / QB_CLIENT_SECRET en el entorno o el .env."
+                "  [X] Faltan QBO_CLIENT_ID / QBO_CLIENT_SECRET en el entorno o el .env."
             )
             sys.exit(1)
         linea(f"  client_id: {args._client_id[:12]}...")
