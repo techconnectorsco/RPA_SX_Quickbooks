@@ -402,7 +402,7 @@ def _cargar_resolvedor_impuestos(realm, token):
 
     # ── 1) TaxRate Id -> porcentaje y nombre ──
     rate_pct, rate_nombre = {}, {}
-    r = _query_qbo(realm, token, "SELECT * FROM TaxRate")
+    r = _query_qbo(realm, token, "SELECT * FROM TaxRate MAXRESULTS 1000")
     if r.status_code == 200:
         for tr in r.json().get("QueryResponse", {}).get("TaxRate", []):
             try:
