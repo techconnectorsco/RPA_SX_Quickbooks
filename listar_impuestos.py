@@ -9,14 +9,18 @@ Es EXACTAMENTE la informacion que los RPAs usan por dentro (match por rate),
 pero mostrada de forma legible para revision humana.
 
 *** SOLO SE EJECUTA EN EL VPS ***
-  Consulta PRODUCCION y refresca el token de produccion (tokens_empresas.json).
-  Si se corre en local se rotarian los tokens del VPS. Por eso, ademas, este
-  script exige QBO_ENTORNO=produccion para siquiera arrancar (blindaje).
+  Consulta PRODUCCION. Exige QBO_ENTORNO=produccion para siquiera arrancar.
 
-Seguridad (igual que sync_clientes.py / listar_items.py):
+*** NO ESCRIBE tokens_empresas.json ***
+  Usa el access_token que ya esta guardado (dura 1 hora). Si vencio, refresca
+  EN MEMORIA y reintenta una sola vez, sin guardar nada. Asi este script se
+  puede correr cuantas veces haga falta sin romper la cadena de tokens que usa
+  el RPA de produccion.
+
+Seguridad:
   - En QuickBooks SOLO lee (GET). No crea ni modifica NADA.
   - No toca la base de datos.
-  - Refresca el token de cada empresa (Intuit rota el refresh -> se guarda).
+  - No rota ni guarda tokens.
 
 Requiere:  pip install requests python-dotenv
 """
@@ -51,11 +55,47 @@ EMPRESAS = [
 ]
 
 
-def refrescar_token(realm):
-    """Refresca el token de una empresa y lo guarda. Devuelve el access_token nuevo."""
-    with open(TOKENS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    empresa = data["empresas"][realm]
+# ════════════════════════════════════════════════════════════════════════════
+#  TOKENS  —  solo lectura del archivo; el refresco es en memoria
+# ════════════════════════════════════════════════════════════════════════════
+
+_TOKENS = {}  # realm -> access_token vivo durante esta corrida
+
+
+def obtener_token(realm, forzar_refresco=False):
+    """access_token valido para el realm, SIN escribir tokens_empresas.json.
+
+    Camino normal: devuelve el access_token ya guardado (QuickBooks lo da con
+    1 hora de vida y el RPA lo renueva en cada corrida), asi no se rota nada.
+    Solo si ese token vencio (401) se refresca, y el refresh_token nuevo se
+    usa en memoria y se descarta: el guardado sigue sirviendo porque Intuit
+    mantiene vigente el anterior durante su ventana de gracia.
+    """
+    if not forzar_refresco and realm in _TOKENS:
+        return _TOKENS[realm]
+
+    try:
+        with open(TOKENS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  [ERROR] No se pudo leer {TOKENS_FILE}: {e}")
+        return None
+
+    empresa = data.get("empresas", {}).get(realm)
+    if empresa is None:
+        print(f"  [ERROR] El realm {realm} no existe en {TOKENS_FILE}.")
+        return None
+
+    # 1) Reusar el access_token guardado (no rota nada).
+    if not forzar_refresco and empresa.get("access_token"):
+        _TOKENS[realm] = empresa["access_token"]
+        return _TOKENS[realm]
+
+    # 2) Vencido: refresco EN MEMORIA. El archivo NO se toca.
+    if not empresa.get("refresh_token"):
+        print(f"  [ERROR] El realm {realm} no tiene refresh_token guardado.")
+        return None
+
     auth = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
     resp = requests.post(
         "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
@@ -70,42 +110,62 @@ def refrescar_token(realm):
     if resp.status_code != 200:
         print(f"  [ERROR refresco] {resp.status_code} {resp.text[:200]}")
         return None
-    nuevos = resp.json()
-    empresa["access_token"] = nuevos["access_token"]
-    empresa["refresh_token"] = nuevos["refresh_token"]  # Intuit rota; hay que guardarlo
-    with open(TOKENS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    return nuevos["access_token"]
+
+    print("  (access_token vencido: refrescado en memoria, archivo intacto)")
+    _TOKENS[realm] = resp.json()["access_token"]
+    return _TOKENS[realm]
 
 
-def _query(realm, token, sql):
-    """GET a /query (solo lectura). Devuelve el QueryResponse o {}."""
+def _get(realm, token, sql):
     url = (
         f"{PROD_BASE_URL}/v3/company/{realm}/query"
         f"?query={requests.utils.quote(sql)}&minorversion=75"
     )
-    resp = requests.get(
+    return requests.get(
         url,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
         timeout=30,
     )
+
+
+def _query(realm, sql):
+    """GET a /query (solo lectura). Devuelve el QueryResponse o {}.
+
+    Si el access_token guardado vencio, refresca en memoria y reintenta 1 vez.
+    """
+    token = obtener_token(realm)
+    if not token:
+        return {}
+
+    resp = _get(realm, token, sql)
+    if resp.status_code == 401:
+        token = obtener_token(realm, forzar_refresco=True)
+        if not token:
+            return {}
+        resp = _get(realm, token, sql)
+
     if resp.status_code != 200:
         print(f"  [ERROR {resp.status_code}] {resp.text[:200]}")
         return {}
     return resp.json().get("QueryResponse", {})
 
 
-def cargar_impuestos(realm, token):
+# ════════════════════════════════════════════════════════════════════════════
+#  REPORTE
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def cargar_impuestos(realm):
     """Devuelve (rates, codes, agencies) tal como los da QuickBooks."""
-    rates = _query(realm, token, "SELECT * FROM TaxRate").get("TaxRate", [])
-    codes = _query(realm, token, "SELECT * FROM TaxCode").get("TaxCode", [])
-    agencies = _query(realm, token, "SELECT * FROM TaxAgency").get("TaxAgency", [])
+    rates = _query(realm, "SELECT * FROM TaxRate").get("TaxRate", [])
+    codes = _query(realm, "SELECT * FROM TaxCode").get("TaxCode", [])
+    agencies = _query(realm, "SELECT * FROM TaxAgency").get("TaxAgency", [])
     return rates, codes, agencies
 
 
 def mostrar(nombre, rates, codes, agencies):
     """Imprime el detalle de impuestos de una empresa de forma legible."""
-    # 1) Mapa TaxRate Id -> (nombre, porcentaje)
+    # 1) Mapa TaxRate Id -> (nombre, porcentaje, activo)
     rate_info = {}
     for tr in rates:
         try:
@@ -118,7 +178,7 @@ def mostrar(nombre, rates, codes, agencies):
     agencia_nombre = {a.get("Id"): a.get("DisplayName", "") for a in agencies}
 
     print("\n" + "-" * 70)
-    print(f"  TAX CODES (lo que se aplica a cada linea de factura)")
+    print("  TAX CODES (lo que se aplica a cada linea de factura)")
     print("-" * 70)
     if not codes:
         print("  (sin TaxCodes o no se pudieron leer)")
@@ -161,8 +221,8 @@ def main():
     if ENTORNO != "produccion":
         sys.exit(
             "BLINDAJE: este script es SOLO para produccion (VPS).\n"
-            "Detectado QBO_ENTORNO='%s'. Para evitar rotar por error los tokens\n"
-            "del VPS desde local, solo corre con QBO_ENTORNO=produccion." % ENTORNO
+            "Detectado QBO_ENTORNO='%s'. Corre solo con QBO_ENTORNO=produccion."
+            % ENTORNO
         )
     if not (CLIENT_ID and CLIENT_SECRET):
         sys.exit("[ERROR] Falta QBO_CLIENT_ID / QBO_CLIENT_SECRET en el .env.")
@@ -171,17 +231,13 @@ def main():
 
     print("=" * 70)
     print("REPORTE DE IMPUESTOS EN QUICKBOOKS (PRODUCCION, SOLO LECTURA)")
+    print("(no se escribe tokens_empresas.json)")
     print("=" * 70)
 
     for emp in EMPRESAS:
         print(f"\n=== {emp['nombre']}  (realm {emp['realm']}) ===")
-        print("  Refrescando token...")
-        token = refrescar_token(emp["realm"])
-        if not token:
-            print("  [SALTADA] no se pudo refrescar el token.")
-            continue
         print("  Consultando impuestos (solo lectura)...")
-        rates, codes, agencies = cargar_impuestos(emp["realm"], token)
+        rates, codes, agencies = cargar_impuestos(emp["realm"])
         mostrar(emp["nombre"], rates, codes, agencies)
 
     print("\n" + "=" * 70)

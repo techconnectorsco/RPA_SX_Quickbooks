@@ -1,6 +1,6 @@
 """
-investigar_exento.py
---------------------
+investigar_ivas.py
+------------------
 Pregunta concreta que resuelve: ¿el TaxCode objetivo (SX = 23, "Exento") esta
 ACTIVO en QuickBooks EN VIVO?
 
@@ -16,6 +16,12 @@ Este script, por empresa:
   3) Reproduce el chequeo del RPA: ¿el id objetivo esta en el set de activos?
 
 Solo lectura (GET). No crea ni modifica nada en QuickBooks.
+
+*** NO ESCRIBE tokens_empresas.json ***
+  Usa el access_token que ya esta guardado (dura 1 hora). Si vencio, refresca
+  EN MEMORIA y reintenta una sola vez, sin guardar nada. Asi este script se
+  puede correr cuantas veces haga falta sin romper la cadena de tokens que usa
+  el RPA de produccion.
 """
 
 import os
@@ -45,13 +51,47 @@ TARGET_TAXCODE = {
 }
 
 
-def refrescar_token(realm):
-    with open(TOKENS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if realm not in data.get("empresas", {}):
+# ════════════════════════════════════════════════════════════════════════════
+#  TOKENS  —  solo lectura del archivo; el refresco es en memoria
+# ════════════════════════════════════════════════════════════════════════════
+
+_TOKENS = {}  # realm -> access_token vivo durante esta corrida
+
+
+def obtener_token(realm, forzar_refresco=False):
+    """access_token valido para el realm, SIN escribir tokens_empresas.json.
+
+    Camino normal: devuelve el access_token ya guardado (QuickBooks lo da con
+    1 hora de vida y el RPA lo renueva en cada corrida), asi no se rota nada.
+    Solo si ese token vencio (401) se refresca, y el refresh_token nuevo se
+    usa en memoria y se descarta: el guardado sigue sirviendo porque Intuit
+    mantiene vigente el anterior durante su ventana de gracia.
+    """
+    if not forzar_refresco and realm in _TOKENS:
+        return _TOKENS[realm]
+
+    try:
+        with open(TOKENS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  [ERROR] No se pudo leer {TOKENS_FILE}: {e}")
+        return None
+
+    empresa = data.get("empresas", {}).get(realm)
+    if empresa is None:
         print(f"  [ERROR] El realm {realm} no existe en {TOKENS_FILE}.")
         return None
-    empresa = data["empresas"][realm]
+
+    # 1) Reusar el access_token guardado (no rota nada).
+    if not forzar_refresco and empresa.get("access_token"):
+        _TOKENS[realm] = empresa["access_token"]
+        return _TOKENS[realm]
+
+    # 2) Vencido: refresco EN MEMORIA. El archivo NO se toca.
+    if not empresa.get("refresh_token"):
+        print(f"  [ERROR] El realm {realm} no tiene refresh_token guardado.")
+        return None
+
     auth = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
     resp = requests.post(
         "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
@@ -66,15 +106,13 @@ def refrescar_token(realm):
     if resp.status_code != 200:
         print(f"  [ERROR refresco] {resp.status_code} {resp.text[:200]}")
         return None
-    nuevos = resp.json()
-    empresa["access_token"] = nuevos["access_token"]
-    empresa["refresh_token"] = nuevos["refresh_token"]
-    with open(TOKENS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    return nuevos["access_token"]
+
+    print("  (access_token vencido: refrescado en memoria, archivo intacto)")
+    _TOKENS[realm] = resp.json()["access_token"]
+    return _TOKENS[realm]
 
 
-def _query(realm, token, sql):
+def _get(realm, token, sql):
     url = (
         f"{PROD_BASE_URL}/v3/company/{realm}/query"
         f"?query={requests.utils.quote(sql)}&minorversion=75"
@@ -86,13 +124,35 @@ def _query(realm, token, sql):
     )
 
 
-def investigar(realm, token, nombre_empresa):
+def _query(realm, sql):
+    """GET a /query. Si el token guardado vencio, refresca y reintenta 1 vez."""
+    token = obtener_token(realm)
+    if not token:
+        return None
+    r = _get(realm, token, sql)
+    if r.status_code == 401:
+        token = obtener_token(realm, forzar_refresco=True)
+        if not token:
+            return r
+        r = _get(realm, token, sql)
+    return r
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  INVESTIGACION
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def investigar(realm, nombre_empresa):
     print("\n" + "=" * 78)
     print(f"  {nombre_empresa.upper()}  (realm {realm})")
     print("=" * 78)
 
     # ── TaxRate: solo para poder anotar nombre/valor de lo que envuelve el code ──
-    r = _query(realm, token, "SELECT * FROM TaxRate MAXRESULTS 1000")
+    r = _query(realm, "SELECT * FROM TaxRate MAXRESULTS 1000")
+    if r is None:
+        print("  [SALTADA] sin token para esta empresa.")
+        return
     if r.status_code != 200:
         print(f"  [ERROR TaxRate {r.status_code}] {r.text[:200]}")
         return
@@ -105,9 +165,11 @@ def investigar(realm, token, nombre_empresa):
         rate_info[str(tr["Id"])] = (tr.get("Name") or "", val)
 
     # ── TaxCode ──
-    r = _query(realm, token, "SELECT * FROM TaxCode MAXRESULTS 1000")
-    if r.status_code != 200:
-        print(f"  [ERROR TaxCode {r.status_code}] {r.text[:200]}")
+    r = _query(realm, "SELECT * FROM TaxCode MAXRESULTS 1000")
+    if r is None or r.status_code != 200:
+        print(f"  [ERROR TaxCode {r.status_code if r is not None else '-'}]")
+        if r is not None:
+            print(f"  {r.text[:200]}")
         return
     codes = r.json().get("QueryResponse", {}).get("TaxCode", [])
 
@@ -174,13 +236,9 @@ def main():
         return
 
     print("Verificando TaxCode 'Exento' en vivo por empresa...")
+    print("(solo lectura; no se escribe tokens_empresas.json)")
     for emp in EMPRESAS:
-        print(f"\nRefrescando token de {emp['nombre']}...")
-        token = refrescar_token(emp["realm"])
-        if token:
-            investigar(emp["realm"], token, emp["nombre"])
-        else:
-            print(f"  [SALTADA] Sin token para {emp['nombre']}.")
+        investigar(emp["realm"], emp["nombre"])
 
 
 if __name__ == "__main__":
