@@ -1,22 +1,19 @@
 """
-investigar_ivas.py
-------------------
-Investiga por que el RPA dice que un impuesto (ej. 'Exento (Ventas)',
-TaxRate 34) NO tiene un TaxCode ACTIVO en QuickBooks, aunque en el
-desplegable de la webapp SI aparezca como opcion.
+investigar_exento.py
+--------------------
+Pregunta concreta que resuelve: ¿el TaxCode objetivo (SX = 23, "Exento") esta
+ACTIVO en QuickBooks EN VIVO?
 
-Contexto: la linea de una factura en QBO referencia un TaxCode, NO un
-TaxRate. El RPA toma el impuesto que eligio el operador (un TaxRate, que es
-lo que guarda la webapp) y lo traduce al TaxCode ACTIVO que lo contiene. Si
-ese TaxRate no esta dentro de ningun TaxCode activo, no se puede facturar
-con el y el RPA frena la factura.
+Por que importa: desde el arreglo del desplegable, cuando el operador elige
+"Exento" la linea guarda qbo_id=23 con objeto=TaxCode. El RPA, para objeto
+TaxCode, solo necesita que ese id este en el set de TaxCodes ACTIVOS que trae
+de QBO en vivo. Si 23 esta activo -> factura la linea Exento. Si no -> la frena.
 
-Este script, por empresa, imprime:
-  1) TODOS los TaxRate: Id, Nombre, Activo, Valor.
-  2) TODOS los TaxCode: Id, Nombre, Activo, y que TaxRate(s) de venta envuelve.
-  3) Analisis enfocado en 'exento' / 'exonerad'.
-  4) Para los TaxRate que le indiques en TARGET_RATE_IDS, dice a que TaxCode
-     ACTIVO resuelve (o avisa que no resuelve) — reproduce la logica del RPA.
+Este script, por empresa:
+  1) Lista los TaxCodes ACTIVOS en vivo (id | nombre).
+  2) Da un VEREDICTO para el TaxCode objetivo: existe / activo / que tasa(s) de
+     venta envuelve y a que %.
+  3) Reproduce el chequeo del RPA: ¿el id objetivo esta en el set de activos?
 
 Solo lectura (GET). No crea ni modifica nada en QuickBooks.
 """
@@ -41,10 +38,10 @@ EMPRESAS = [
     {"nombre": "Corporacion Latinoamericana T.I.", "realm": "9130355360394696"},
 ]
 
-# TaxRate Ids que querés rastrear puntualmente por empresa (el que dio error).
-# El RPA se quejo de TaxRate 34 ('Exento ( Ventas)') en Soportexperto.
-TARGET_RATE_IDS = {
-    "9130355360397996": ["34"],   # Soportexperto
+# TaxCode que debe estar ACTIVO en vivo, por empresa (el que manda el desplegable
+# cuando se elige "Exento"). Por ahora solo SX. Agrega los otros cuando toque.
+TARGET_TAXCODE = {
+    "9130355360397996": "23",  # Soportexperto -> "Exento"
 }
 
 
@@ -90,95 +87,85 @@ def _query(realm, token, sql):
 
 
 def investigar(realm, token, nombre_empresa):
-    # ── TaxRate ──
-    r = _query(realm, token, "SELECT * FROM TaxRate MAXRESULTS 1000")
-    rates = r.json().get("QueryResponse", {}).get("TaxRate", []) if r.status_code == 200 else []
-    rate_info = {}  # id -> (nombre, activo, valor)
-    for tr in rates:
-        rid = str(tr["Id"])
-        try:
-            val = round(float(tr.get("RateValue", 0)), 2)
-        except (TypeError, ValueError):
-            val = None
-        rate_info[rid] = (tr.get("Name") or "", bool(tr.get("Active", True)), val)
-
-    # ── TaxCode (con las tasas de venta que envuelve) ──
-    r = _query(realm, token, "SELECT * FROM TaxCode MAXRESULTS 1000")
-    codes = r.json().get("QueryResponse", {}).get("TaxCode", []) if r.status_code == 200 else []
-
-    # rate_id -> lista de (taxcode_id, taxcode_nombre, taxcode_activo) que lo envuelven en VENTAS
-    rate_en_codes = {}
-    code_rows = []  # (id, nombre, activo, [rate_ids venta])
-    for tc in codes:
-        tcid = str(tc["Id"])
-        tcnom = tc.get("Name") or ""
-        tcact = bool(tc.get("Active", True))
-        detalles = (tc.get("SalesTaxRateList") or {}).get("TaxRateDetail", [])
-        rids = []
-        for det in detalles:
-            rid = str((det.get("TaxRateRef") or {}).get("value") or "")
-            if rid:
-                rids.append(rid)
-                rate_en_codes.setdefault(rid, []).append((tcid, tcnom, tcact))
-        code_rows.append((tcid, tcnom, tcact, rids))
-
     print("\n" + "=" * 78)
     print(f"  {nombre_empresa.upper()}  (realm {realm})")
     print("=" * 78)
 
-    print(f"\n  TAX RATES ({len(rate_info)}):")
-    print(f"  {'Id':>5}  {'Act':<4} {'Valor':>7}  Nombre")
-    print("  " + "-" * 60)
-    for rid, (nom, act, val) in sorted(rate_info.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
-        print(f"  {rid:>5}  {'Si' if act else 'NO':<4} {str(val):>7}  {nom}")
+    # ── TaxRate: solo para poder anotar nombre/valor de lo que envuelve el code ──
+    r = _query(realm, token, "SELECT * FROM TaxRate MAXRESULTS 1000")
+    if r.status_code != 200:
+        print(f"  [ERROR TaxRate {r.status_code}] {r.text[:200]}")
+        return
+    rate_info = {}  # id -> (nombre, valor)
+    for tr in r.json().get("QueryResponse", {}).get("TaxRate", []):
+        try:
+            val = round(float(tr.get("RateValue", 0)), 2)
+        except (TypeError, ValueError):
+            val = None
+        rate_info[str(tr["Id"])] = (tr.get("Name") or "", val)
 
-    print(f"\n  TAX CODES ({len(code_rows)}):")
-    for tcid, tcnom, tcact, rids in sorted(code_rows, key=lambda x: int(x[0]) if x[0].isdigit() else 0):
-        envs = ", ".join(
-            f"{rid}({rate_info.get(rid, ('?',))[0]})" for rid in rids
-        ) or "(sin tasas de venta)"
-        print(f"  [{tcid:>5}] {'Si' if tcact else 'NO':<3} '{tcnom}'  <- envuelve: {envs}")
+    # ── TaxCode ──
+    r = _query(realm, token, "SELECT * FROM TaxCode MAXRESULTS 1000")
+    if r.status_code != 200:
+        print(f"  [ERROR TaxCode {r.status_code}] {r.text[:200]}")
+        return
+    codes = r.json().get("QueryResponse", {}).get("TaxCode", [])
 
-    # ── Analisis exento / exonerado ──
-    print("\n  --- EXENTO / EXONERADO ---")
-    for rid, (nom, act, val) in rate_info.items():
-        n = nom.lower()
-        if "exento" in n or "exonerad" in n:
-            donde = rate_en_codes.get(rid, [])
-            activos = [c for c in donde if c[2]]
-            print(f"  TaxRate [{rid}] '{nom}' (activo={act})")
-            if donde:
-                for tcid, tcnom, tcact in donde:
-                    print(f"       dentro de TaxCode [{tcid}] '{tcnom}' (activo={tcact})")
-            else:
-                print("       NO esta dentro de ningun TaxCode.")
-            print(f"       -> TaxCode ACTIVO que lo envuelve: "
-                  f"{[c[0] for c in activos] or 'NINGUNO (por eso el RPA frena)'}")
+    code_info = {}  # id -> (nombre, activo, [rate_ids de venta])
+    activos_ids = set()  # EXACTAMENTE el set que usa el RPA (res["taxcodes"])
+    for tc in codes:
+        tcid = str(tc["Id"])
+        tcnom = tc.get("Name") or ""
+        tcact = bool(tc.get("Active", True))
+        rids = []
+        for det in (tc.get("SalesTaxRateList") or {}).get("TaxRateDetail", []):
+            rid = str((det.get("TaxRateRef") or {}).get("value") or "")
+            if rid:
+                rids.append(rid)
+        code_info[tcid] = (tcnom, tcact, rids)
+        if tcact:
+            activos_ids.add(tcid)
 
-    # ── TaxCode llamado exactamente 'exento' (el que usa el RPA para el check exonerado) ──
-    exento_tc = [tcid for tcid, tcnom, tcact, _ in code_rows
-                 if " ".join(tcnom.lower().split()) == "exento" and tcact]
-    print(f"\n  TaxCode ACTIVO llamado exactamente 'Exento' (res['exento']): "
-          f"{exento_tc or 'NINGUNO'}")
+    # 1) Lista compacta de TaxCodes ACTIVOS
+    print(f"\n  TaxCodes ACTIVOS en vivo ({len(activos_ids)}):")
+    for tcid in sorted(activos_ids, key=lambda x: int(x) if x.isdigit() else 0):
+        print(f"     {tcid:>4} | {code_info[tcid][0]}")
 
-    # ── Resolucion puntual de los TaxRate objetivo ──
-    objetivos = TARGET_RATE_IDS.get(realm, [])
-    if objetivos:
-        print("\n  --- RESOLUCION DE LOS TAXRATE OBJETIVO ---")
-        for rid in objetivos:
-            info = rate_info.get(rid)
-            if not info:
-                print(f"  TaxRate [{rid}]: NO EXISTE en esta empresa.")
-                continue
-            nom, act, val = info
-            activos = [c for c in rate_en_codes.get(rid, []) if c[2]]
-            print(f"  TaxRate [{rid}] '{nom}' (activo={act}, valor={val})")
-            if activos:
-                print(f"       OK -> resuelve al TaxCode activo {activos[0][0]} '{activos[0][1]}'")
-            else:
-                print("       ERROR -> no hay TaxCode ACTIVO que lo contenga. "
-                      "Hay que activar/crear ese TaxCode en QBO, o mapear el "
-                      "impuesto 'Exento' al TaxCode correcto en la base.")
+    # 2) y 3) Veredicto para el objetivo
+    objetivo = TARGET_TAXCODE.get(realm)
+    if not objetivo:
+        print("\n  (sin TaxCode objetivo configurado para esta empresa)")
+        return
+
+    print(f"\n  --- VEREDICTO: TaxCode objetivo [{objetivo}] ---")
+    if objetivo not in code_info:
+        print(f"     NO EXISTE el TaxCode {objetivo} en vivo. -> ERROR, revisar id.")
+        return
+
+    nom, act, rids = code_info[objetivo]
+    envs = (
+        ", ".join(
+            f"{rid}({rate_info.get(rid, ('?',))[0]})={rate_info.get(rid, ('', None))[1]}%"
+            for rid in rids
+        )
+        or "(sin tasas de venta)"
+    )
+    print(f"     Nombre     : '{nom}'")
+    print(f"     Activo     : {'SI' if act else 'NO'}")
+    print(f"     Envuelve   : {envs}")
+
+    # Chequeo EXACTO del RPA para objeto=TaxCode: ¿el id esta en el set de activos?
+    puede = objetivo in activos_ids
+    print(
+        f"\n     Chequeo RPA (objeto=TaxCode): ¿'{objetivo}' en TaxCodes activos? "
+        f"{'SI' if puede else 'NO'}"
+    )
+    if puede:
+        print("     >> OK: el RPA PODRA facturar la linea Exento con este codigo.")
+    else:
+        print("     >> ERROR: el RPA FRENARA la linea Exento. Hay que REACTIVAR ese")
+        print("        TaxCode en QuickBooks (con visto bueno de contabilidad), o")
+        print("        usar otro codigo 0% activo.")
 
 
 def main():
@@ -186,7 +173,7 @@ def main():
         print("[ERROR] Faltan QBO_CLIENT_ID o QBO_CLIENT_SECRET en el .env.")
         return
 
-    print("Investigando IVAs (TaxRate vs TaxCode) por empresa...")
+    print("Verificando TaxCode 'Exento' en vivo por empresa...")
     for emp in EMPRESAS:
         print(f"\nRefrescando token de {emp['nombre']}...")
         token = refrescar_token(emp["realm"])
